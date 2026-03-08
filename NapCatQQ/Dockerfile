@@ -5,11 +5,13 @@ RUN useradd --no-log-init -d /app napcat
 WORKDIR /app
 
 # 从远程拉取所需文件（NapCat.Shell.zip 来自 Release，其余来自主仓库）
-RUN apt-get install -y --no-install-recommends git && \
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends git ca-certificates && \
     \
     # 下载 NapCat.Shell.zip（自动获取最新版本）
     LATEST=$(curl -sf https://api.github.com/repos/NapNeko/NapCatQQ/releases/latest \
         | grep '"tag_name"' | cut -d'"' -f4) && \
+    echo "拉取版本: ${LATEST}" && \
     curl -L -o /app/NapCat.Shell.zip \
         https://github.com/NapNeko/NapCatQQ/releases/download/${LATEST}/NapCat.Shell.zip && \
     \
@@ -21,9 +23,10 @@ RUN apt-get install -y --no-install-recommends git && \
     cp entrypoint.sh /app/entrypoint.sh && \
     cp -r templates /app/templates && \
     \
-    # 清理临时文件和 git
+    # 清理临时文件和缓存
     rm -rf /tmp/napcat-docker && \
-    apt-get remove -y git && apt-get autoremove -y && apt-get clean
+    apt-get remove -y git && apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
 
 # 安装Linux QQ
 RUN arch=$(arch | sed s/aarch64/arm64/ | sed s/x86_64/amd64/) && \
