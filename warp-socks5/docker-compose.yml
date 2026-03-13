@@ -11,7 +11,7 @@ services:
     # 仅绑定本机：127.0.0.1:1080（推荐）
     # 如需局域网访问，改为 "0.0.0.0:1080:1080"
     ports:
-      - "127.0.0.1:1080:1080"
+      - "0.0.0.0:1080:1080"
 
     # ── 配置参数 ────────────────────────────────────────────────
     environment:
@@ -27,11 +27,24 @@ services:
     volumes:
       - warp-data:/warp/data
 
-    # ── 必要权限（warp-go 需要创建 TUN 设备）──────────────────
+    # ── 权限说明 ────────────────────────────────────────────────
+    # NET_ADMIN  : 必须，创建虚拟网卡、修改容器路由表
+    # SYS_MKNOD  : 可选，宿主机无 /dev/net/tun 时由容器自动创建
     cap_add:
       - NET_ADMIN
+      - SYS_MKNOD
+
+    # devices 说明：
+    #   ① 宿主机有 /dev/net/tun（KVM / 物理机，绝大多数情况）
+    #      → 保留此项，直接透传给容器使用
+    #   ② 宿主机无 /dev/net/tun（某些 OpenVZ / LXC）
+    #      → 注释掉此项，entrypoint 会在容器内自动创建
+    #      → 前提：内核支持 tun 模块，且拥有上方 SYS_MKNOD 权限
+    #   ③ OpenVZ 且内核完全不支持 tun
+    #      → 只能去服务商控制面板开启 TUN/TAP，无法绕过
     devices:
       - /dev/net/tun:/dev/net/tun
+
     sysctls:
       - net.ipv4.conf.all.src_valid_mark=1
       - net.ipv6.conf.all.disable_ipv6=0
