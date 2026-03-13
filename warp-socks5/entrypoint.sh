@@ -34,15 +34,55 @@ mkdir -p /warp/data
 SOCKS5_PID=""
 
 # ════════════════════════════════════════════════════════════════
-#  TUN 设备检查
+#  TUN 设备检查 & 自动创建
+#
+#  /dev/net/tun 不存在时的三种结果：
+#    1. 有 mknod 权限（SYS_MKNOD）→ 自动创建，正常启动
+#    2. 无 mknod 权限但内核有 tun 模块 → 提示在宿主机手动执行命令
+#    3. OpenVZ/LXC 内核不支持 tun → 只能去服务商面板开启 TUN/TAP
 # ════════════════════════════════════════════════════════════════
 check_tun() {
-    if [[ ! -e /dev/net/tun ]]; then
-        red "/dev/net/tun 不存在"
-        red "请确保容器拥有: --device=/dev/net/tun 以及 --cap-add=NET_ADMIN"
+    if [[ -e /dev/net/tun ]]; then
+        green "/dev/net/tun 已存在，检查通过"
+        return 0
+    fi
+
+    yellow "/dev/net/tun 不存在，尝试自动创建..."
+
+    # 检查 tun 内核模块是否可用
+    if ! grep -q tun /proc/modules 2>/dev/null \
+    && ! modprobe tun 2>/dev/null; then
+        red "内核 tun 模块不可用"
+        red "──────────────────────────────────────────────"
+        red "可能原因："
+        red "  1. OpenVZ / LXC 容器化宿主机，内核共享，无法加载模块"
+        red "     → 解决：去服务商控制面板开启 TUN/TAP 支持"
+        red "  2. 物理机 / KVM，但模块未加载"
+        red "     → 解决：在宿主机执行 modprobe tun"
+        red "──────────────────────────────────────────────"
         exit 1
     fi
-    green "/dev/net/tun 检查通过"
+
+    # 尝试用 mknod 创建设备文件（需要容器有 SYS_MKNOD 权限）
+    mkdir -p /dev/net
+    if mknod /dev/net/tun c 10 200 2>/dev/null; then
+        chmod 666 /dev/net/tun
+        green "/dev/net/tun 自动创建成功"
+        return 0
+    fi
+
+    # mknod 失败（无权限），给出明确指引
+    red "自动创建 /dev/net/tun 失败（容器缺少 SYS_MKNOD 权限）"
+    red "──────────────────────────────────────────────────────"
+    red "请在宿主机执行以下命令后重启容器："
+    red ""
+    red "  mkdir -p /dev/net"
+    red "  mknod /dev/net/tun c 10 200"
+    red "  chmod 666 /dev/net/tun"
+    red ""
+    red "如需开机持久化，将以上命令加入 /etc/rc.local"
+    red "──────────────────────────────────────────────────────"
+    exit 1
 }
 
 # ════════════════════════════════════════════════════════════════
