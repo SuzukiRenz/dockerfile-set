@@ -1,0 +1,53 @@
+services:
+  warp-socks5:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: warp-socks5:latest
+    container_name: warp-socks5
+    restart: unless-stopped
+
+    # ── 端口映射 ────────────────────────────────────────────────
+    # 仅绑定本机：127.0.0.1:1080（推荐）
+    # 如需局域网访问，改为 "0.0.0.0:1080:1080"
+    ports:
+      - "127.0.0.1:1080:1080"
+
+    # ── 配置参数 ────────────────────────────────────────────────
+    environment:
+      - SOCKS5_PORT=1080
+      # SOCKS5 认证（留空 = 无需认证）
+      - SOCKS5_USER=
+      - SOCKS5_PASS=
+      # 强制重新注册 WARP 账户（换新 IP 时用）
+      - FORCE_REGISTER=false
+      - TZ=Asia/Shanghai
+
+    # ── 账户信息持久化（重启不重新注册）────────────────────────
+    volumes:
+      - warp-data:/warp/data
+
+    # ── 必要权限（warp-go 需要创建 TUN 设备）──────────────────
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+      - net.ipv6.conf.all.disable_ipv6=0
+
+    # ── 健康检查（通过 SOCKS5 验证 WARP 流量）─────────────────
+    healthcheck:
+      test: >
+        bash -c 'curl -sx "socks5h://127.0.0.1:$${SOCKS5_PORT}"
+        --max-time 10 -k
+        https://www.cloudflare.com/cdn-cgi/trace
+        | grep -qE "warp=(on|plus)"'
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 90s
+
+volumes:
+  warp-data:
+    driver: local
