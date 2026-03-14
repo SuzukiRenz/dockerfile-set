@@ -1,0 +1,72 @@
+# =============================================================================
+# docker-compose.yml — 备份工具容器编排
+# 使用: docker compose up -d
+# =============================================================================
+
+services:
+  backup:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: backup-tool:latest
+    container_name: backup-tool
+    restart: unless-stopped
+
+    # ── 环境变量 ──────────────────────────────────────────────────────────────
+    # 所有配置项均在 .env 文件中，无需修改此处
+    env_file:
+      - .env
+
+    # ── 数据卷映射 ────────────────────────────────────────────────────────────
+    volumes:
+      # 备份源目录（宿主机路径:容器内路径）
+      # 与 .env 中的 BACKUP_DIRS 对应，按需添加或修改
+      - /opt/data:/data:ro                  # 源数据（只读挂载，更安全）
+      # - /opt/mysql:/data/mysql:ro         # 示例：单独挂载数据库目录
+      # - /opt/app:/data/app:ro             # 示例：单独挂载应用目录
+
+      # 本地备份存储目录（宿主机路径:容器内路径）
+      # 与 .env 中的 BACKUP_DEST 对应
+      - /opt/backup:/backup
+
+      # 日志目录（可选，方便查看历史日志）
+      - /opt/backup/logs:/app/logs
+
+      # 如果使用 .env 文件配置，挂载到容器中（可选）
+      # - ./.env:/app/.env:ro
+
+    # ── 资源限制（可选）──────────────────────────────────────────────────────
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '1.0'
+    #       memory: 512M
+    #     reservations:
+    #       memory: 64M
+
+    # ── 健康检查 ──────────────────────────────────────────────────────────────
+    healthcheck:
+      test: ["CMD", "pgrep", "cron"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    # ── 日志配置 ──────────────────────────────────────────────────────────────
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+# =============================================================================
+# 快速使用指南
+# =============================================================================
+# 1. 复制配置:    cp .env.example .env
+# 2. 编辑配置:    nano .env（修改 BACKUP_DIRS、BACKUP_PREFIX 等）
+# 3. 构建镜像:    docker compose build
+# 4. 启动容器:    docker compose up -d
+# 5. 查看日志:    docker compose logs -f
+# 6. 立即执行:    docker compose exec backup /app/backup.sh
+# 7. 停止服务:    docker compose down
+# =============================================================================
