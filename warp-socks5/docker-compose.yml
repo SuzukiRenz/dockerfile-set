@@ -59,7 +59,7 @@ services:
 
     cap_add:
       - NET_ADMIN     # 必须：创建 TUN 虚拟网卡
-      - SYS_MKNOD     # 可选：宿主机无 /dev/net/tun 时容器自动创建
+      # - SYS_MKNOD     # 可选：宿主机无 /dev/net/tun 时容器自动创建
     devices:
       - /dev/net/tun:/dev/net/tun
     sysctls:
