@@ -1,9 +1,9 @@
 services:
   warp-socks5:
-    #build:
-      #context: .
-      #dockerfile: Dockerfile
-    image: suzukirenz/warp-socks5:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: warp-socks5:latest
     container_name: warp-socks5
     restart: unless-stopped
 
@@ -40,16 +40,24 @@ services:
       # ┌─────────────────────────────────────────────────────────┐
       # │  出口 IP 地区筛选                                       │
       # │  留空  = 不限制                                         │
-      # │  单个  = "US"                                           │
-      # │  多个  = "US,JP,SG,HK"（随机命中其中一个即可）         │
-      # │  原理：注册新账户直到出口 IP 地区匹配，最多重试 N 次    │
+      # │  单个  = "US"                                             │
+      # │  多个  = "US,JP,SG,HK"（随机命中其中一个即可）              │
+      # │  原理：注册新账户直到出口 IP 地区匹配，最多重试 N 次 失败则退回默认地区   │
       # └─────────────────────────────────────────────────────────┘
       - WARP_COUNTRIES=
-      - WARP_COUNTRY_RETRY=10   # 地区不匹配时最大重试次数
+      - WARP_COUNTRY_RETRY=5   # 地区不匹配时最大重试次数
 
       # ┌─────────────────────────────────────────────────────────┐
       # │  其他                                                   │
       # └─────────────────────────────────────────────────────────┘
+      # ┌─────────────────────────────────────────────────────────┐
+      # │  IP 栈优先级                                            │
+      # │  留空 = 系统默认（Alpine 通常已是 IPv4 优先）           │
+      # │  4    = 强制 IPv4 优先                                  │
+      # │  6    = 强制 IPv6 优先                                  │
+      # └─────────────────────────────────────────────────────────┘
+      - PREFER_IP=               # 留空=默认 | 4=IPv4优先 | 6=IPv6优先
+
       - WARP_DEVICE_NAME=warp-docker  # 设备名（多容器时建议各自不同）
       - FORCE_REGISTER=false          # true = 强制重注册（换 IP 用）
       - TZ=Asia/Shanghai
