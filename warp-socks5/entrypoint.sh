@@ -45,9 +45,13 @@ FORCE_REGISTER="${FORCE_REGISTER:-false}"
 # ── 路径 ─────────────────────────────────────────────────────────
 WARPGO_BIN="/usr/local/bin/warp-go"
 WARPGO_CONF="/warp/data/warp.conf"
+WARPGO_LOG="/warp/data/warp-go.log"    # warp-go 运行日志，出问题直接 cat
 WARP_PUBKEY="bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
-# 使用 DNS 域名而非硬编码 IP（fscarmen 方式，自动解析到最优节点）
 WARP_ENDPOINT="engage.cloudflareclient.com:2408"
+
+# TUN 接口名：必须与 write_conf 里 [Device].Name 完全一致
+# warp-go 会用该名字创建 TUN 接口；所有 ip link / --interface 都引用此变量
+WARP_IF="WARP"
 
 # fscarmen 公共 API（注册 / pluskey）
 WARP_REG_API="https://warp.cloudflare.nyc.mn"
@@ -311,7 +315,7 @@ write_conf() {
         echo "Type       = ${TYPE}"
         echo ""
         echo "[Device]"
-        echo "Name       = ${WARP_DEVICE_NAME}"
+        echo "Name       = ${WARP_IF}"     # TUN 接口名，固定为 WARP
         echo "MTU        = ${MTU}"
         echo ""
         echo "[Peer]"
@@ -341,7 +345,7 @@ upgrade_to_plus() {
         --device-name="$WARP_DEVICE_NAME" &>/dev/null || true
 
     # 快速启动验证
-    "$WARPGO_BIN" --config="$WARPGO_CONF" &
+    "$WARPGO_BIN" --config="$WARPGO_CONF" >> "$WARPGO_LOG" 2>&1 &
     local TMP_PID=$!
     sleep 8
     local STATUS; STATUS=$(get_warp_status)
@@ -372,7 +376,7 @@ register_teams() {
         --team-config="$WARP_TEAMS_TOKEN" \
         --device-name="$DNAME" &>/dev/null || true
 
-    "$WARPGO_BIN" --config="$WARPGO_CONF" &
+    "$WARPGO_BIN" --config="$WARPGO_CONF" >> "$WARPGO_LOG" 2>&1 &
     local TMP_PID=$!
     sleep 8
     local STATUS; STATUS=$(get_warp_status)
@@ -456,13 +460,13 @@ get_warp_status() {
 get_warp_country() {
     # 优先用 cloudflare trace 的 loc 字段（通过 WARP TUN 接口）
     local LOC
-    LOC=$(curl -s4 --interface WARP --max-time 8 \
+    LOC=$(curl -s4 --interface "${WARP_IF}" --max-time 8 \
         https://www.cloudflare.com/cdn-cgi/trace -k 2>/dev/null \
         | awk -F= '/^loc/{print $2}' | tr -d '[:space:]' || true)
     [[ -n "$LOC" ]] && echo "$LOC" && return
 
     # 备用：通过 ip.cloudflare.nyc.mn WARP 接口获取
-    local JSON; JSON=$(get_ip_info 4 "WARP")
+    local JSON; JSON=$(get_ip_info 4 "${WARP_IF}")
     awk -F'"' '/"country"/{print $4}' <<< "$JSON"
 }
 
@@ -472,10 +476,13 @@ get_warp_country() {
 wait_tun_up() {
     yellow "等待 WARP TUN 接口..."
     for i in $(seq 1 30); do
-        ip link show WARP &>/dev/null 2>&1 && { green "WARP 接口就绪 (${i}×2s)"; sleep 2; return 0; }
+        ip link show "${WARP_IF}" &>/dev/null 2>&1 && { green "WARP 接口就绪 (${i}×2s)"; sleep 2; return 0; }
         sleep 2
     done
-    red "WARP 接口 60s 内未出现"; return 1
+    red "WARP (${WARP_IF}) 接口 60s 内未出现"
+    red "  warp-go 最后 30 行日志:"
+    tail -30 "$WARPGO_LOG" 2>/dev/null | sed 's/^/  /' || red "  (日志为空，warp-go 可能未能启动)"
+    return 1
 }
 
 # ════════════════════════════════════════════════════════════════
@@ -508,7 +515,7 @@ verify_and_filter() {
         if ! $CONNECTED; then
             red "WARP 连通失败"
             kill -15 "$(pgrep warp-go 2>/dev/null)" 2>/dev/null || true; sleep 3
-            "$WARPGO_BIN" --config="$WARPGO_CONF" &
+            "$WARPGO_BIN" --config="$WARPGO_CONF" >> "$WARPGO_LOG" 2>&1 &
             WARPGO_PID=$!
             [[ $TRY -ge $MAX_TRY ]] && { red "超出最大重试次数"; return 1; }
             continue
@@ -548,7 +555,7 @@ verify_and_filter() {
         register_base_account
         write_conf "$WARP_ACCOUNT_TYPE"
 
-        "$WARPGO_BIN" --config="$WARPGO_CONF" &
+        "$WARPGO_BIN" --config="$WARPGO_CONF" >> "$WARPGO_LOG" 2>&1 &
         WARPGO_PID=$!
         sleep 5
     done
@@ -635,7 +642,7 @@ watchdog() {
         # warp-go 进程丢失
         if ! pgrep -x warp-go &>/dev/null; then
             yellow "[watchdog] warp-go 丢失，重启..."
-            "$WARPGO_BIN" --config="$WARPGO_CONF" &
+            "$WARPGO_BIN" --config="$WARPGO_CONF" >> "$WARPGO_LOG" 2>&1 &
             WARPGO_PID=$!
             sleep 10
         fi
@@ -650,7 +657,7 @@ watchdog() {
             FAIL=$((FAIL+1))
             yellow "[watchdog] 掉线 (${FAIL}/${MAX_FAIL})，重启..."
             kill -15 "$(pgrep warp-go)" 2>/dev/null || true; sleep 3
-            "$WARPGO_BIN" --config="$WARPGO_CONF" &
+            "$WARPGO_BIN" --config="$WARPGO_CONF" >> "$WARPGO_LOG" 2>&1 &
             WARPGO_PID=$!
             sleep 15
 
@@ -658,7 +665,7 @@ watchdog() {
                 yellow "[watchdog] 连续失败，暂停 5 分钟..."
                 kill -15 "$(pgrep warp-go)" 2>/dev/null || true
                 sleep 300
-                "$WARPGO_BIN" --config="$WARPGO_CONF" &
+                "$WARPGO_BIN" --config="$WARPGO_CONF" >> "$WARPGO_LOG" 2>&1 &
                 WARPGO_PID=$!
                 sleep 15
                 FAIL=0
@@ -699,7 +706,7 @@ calc_mtu
 setup_account
 
 green "启动 warp-go..."
-"$WARPGO_BIN" --config="$WARPGO_CONF" &
+"$WARPGO_BIN" --config="$WARPGO_CONF" >> "$WARPGO_LOG" 2>&1 &
 WARPGO_PID=$!
 
 verify_and_filter
