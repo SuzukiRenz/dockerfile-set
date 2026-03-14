@@ -1,65 +1,65 @@
 services:
   warp-socks5:
-    #build:
-      #context: .
-      #dockerfile: Dockerfile
-    image: suzukirenz/warp-socks5:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: warp-socks5:latest
     container_name: warp-socks5
     restart: unless-stopped
 
     ports:
-      - "127.0.0.1:1080:1080"   # 仅本机访问
+      - "127.0.0.1:1080:1080"   # 仅本机访问（推荐）
       # - "0.0.0.0:1080:1080"  # 局域网访问，取消注释
 
     environment:
-      # ┌─────────────────────────────────────────────────────┐
-      # │  SOCKS5 代理设置                                    │
-      # └─────────────────────────────────────────────────────┘
+      # ┌─────────────────────────────────────────────────────────┐
+      # │  SOCKS5 代理                                            │
+      # └─────────────────────────────────────────────────────────┘
       - SOCKS5_PORT=1080
       - SOCKS5_USER=            # 留空 = 无需认证
       - SOCKS5_PASS=
 
-      # ┌─────────────────────────────────────────────────────┐
-      # │  WARP 账户类型（三选一）                            │
-      # │  free  : 免费账户，无限流量（默认）                 │
-      # │  plus  : WARP+，有 key 直接用，留空自动获取         │
-      # │  teams : Zero Trust，有 token 直接用，留空自动获取  │
-      # └─────────────────────────────────────────────────────┘
+      # ┌─────────────────────────────────────────────────────────┐
+      # │  WARP 账户类型（三选一）                                │
+      # │  free  → 免费账户，无限流量（默认）                     │
+      # │  plus  → WARP+ 付费，有 key 直接用，留空自动从公共池取  │
+      # │  teams → Zero Trust，有 token 直接用，留空自动从公共池取│
+      # └─────────────────────────────────────────────────────────┘
       - WARP_ACCOUNT_TYPE=free
 
       # WARP+ 许可证密钥（type=plus 时生效）
-      # 格式：xxxxxxxx-xxxxxxxx-xxxxxxxx
-      # 留空则自动从公共池获取（不保证稳定，建议填自己的）
+      # 格式：xxxxxxxx-xxxxxxxx-xxxxxxxx（手机 WARP App → 账户 → 密钥）
+      # 留空：尝试自动获取公共池密钥（不稳定，建议填自己的）
       - WARP_LICENSE_KEY=
 
       # Zero Trust Token（type=teams 时生效）
-      # 获取：https://warp-token.cloudflare.now.cc/
-      # 留空则尝试自动获取公共 Token
+      # 获取地址：在 Zero Trust 控制台创建，或通过公共池
+      # 留空：尝试自动获取公共 Token
       - WARP_TEAMS_TOKEN=
 
-      # ┌─────────────────────────────────────────────────────┐
-      # │  出口 IP 地区筛选                                   │
-      # │  留空 = 不限制，接受任何地区                        │
-      # │  单个 = "US"                                        │
-      # │  多个 = "US,JP,SG,HK"（随机接受其中任一）          │
-      # │  原理：注册新账户直到出口 IP 匹配目标地区           │
-      # └─────────────────────────────────────────────────────┘
-      - WARP_COUNTRIES=         # 例: US 或 US,JP,SG
+      # ┌─────────────────────────────────────────────────────────┐
+      # │  出口 IP 地区筛选                                       │
+      # │  留空  = 不限制                                         │
+      # │  单个  = "US"                                           │
+      # │  多个  = "US,JP,SG,HK"（随机命中其中一个即可）         │
+      # │  原理：注册新账户直到出口 IP 地区匹配，最多重试 N 次    │
+      # └─────────────────────────────────────────────────────────┘
+      - WARP_COUNTRIES=
       - WARP_COUNTRY_RETRY=10   # 地区不匹配时最大重试次数
 
-      # ┌─────────────────────────────────────────────────────┐
-      # │  其他设置                                           │
-      # └─────────────────────────────────────────────────────┘
-      - WARP_DEVICE_NAME=warp-docker  # 设备名（多实例时建议不同）
-      - FORCE_REGISTER=false          # true=强制重新注册（换 IP）
+      # ┌─────────────────────────────────────────────────────────┐
+      # │  其他                                                   │
+      # └─────────────────────────────────────────────────────────┘
+      - WARP_DEVICE_NAME=warp-docker  # 设备名（多容器时建议各自不同）
+      - FORCE_REGISTER=false          # true = 强制重注册（换 IP 用）
       - TZ=Asia/Shanghai
 
     volumes:
-      - warp-data:/warp/data    # 持久化账户信息（重启不重注册）
+      - warp-data:/warp/data    # 持久化账户（重启不重注册）
 
     cap_add:
-      - NET_ADMIN     # 必须：创建虚拟网卡
-      - SYS_MKNOD     # 可选：宿主机无 /dev/net/tun 时自动创建
+      - NET_ADMIN     # 必须：创建 TUN 虚拟网卡
+      - SYS_MKNOD     # 可选：宿主机无 /dev/net/tun 时容器自动创建
     devices:
       - /dev/net/tun:/dev/net/tun
     sysctls:
