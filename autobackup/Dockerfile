@@ -22,12 +22,35 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zstd \
     findutils \
     procps \
+    python3 \
     && rm -rf /var/lib/apt/lists/*
 
-# ─── 安装 rclone（单二进制，同时支持 WebDAV + S3 及几十种后端）────────────────
-# 官方安装脚本自动识别架构（amd64 / arm64 等）
-RUN curl -fsSL https://rclone.org/install.sh | bash \
-    && rm -rf /tmp/rclone*
+# ─── 安装 rclone（直接下载二进制，无需 unzip，支持 amd64 / arm64）────────────
+# 用 python3 解压 zip（slim 镜像自带，无需额外安装）
+RUN ARCH=$(uname -m) && \
+    case "$ARCH" in \
+        x86_64)  RCLONE_ARCH="amd64" ;; \
+        aarch64) RCLONE_ARCH="arm64" ;; \
+        armv7l)  RCLONE_ARCH="arm-v7" ;; \
+        *)       echo "Unsupported arch: $ARCH" && exit 1 ;; \
+    esac && \
+    RCLONE_VER=$(curl -fsSL "https://api.github.com/repos/rclone/rclone/releases/latest" \
+        | grep '"tag_name"' | head -1 | sed 's/.*"v\([^"]*\)".*/\1/') && \
+    echo "Installing rclone v${RCLONE_VER} for ${RCLONE_ARCH}" && \
+    curl -fsSL "https://github.com/rclone/rclone/releases/download/v${RCLONE_VER}/rclone-v${RCLONE_VER}-linux-${RCLONE_ARCH}.zip" \
+        -o /tmp/rclone.zip && \
+    python3 -c "
+import zipfile, shutil
+with zipfile.ZipFile('/tmp/rclone.zip') as z:
+    for name in z.namelist():
+        if name.endswith('/rclone'):
+            with z.open(name) as src, open('/usr/local/bin/rclone', 'wb') as dst:
+                shutil.copyfileobj(src, dst)
+            break
+" && \
+    chmod +x /usr/local/bin/rclone && \
+    rm -f /tmp/rclone.zip && \
+    rclone version
 
 # ─── 创建应用目录结构 ─────────────────────────────────────────────────────────
 RUN mkdir -p /app/logs /backup /data
