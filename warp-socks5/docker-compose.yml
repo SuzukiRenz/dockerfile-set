@@ -1,8 +1,8 @@
 services:
   warp-socks5:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    # build:
+      # context: .
+      # dockerfile: Dockerfile
     image: warp-socks5:latest
     container_name: warp-socks5
     restart: unless-stopped
@@ -56,7 +56,7 @@ services:
       # │  4    = 强制 IPv4 优先                                  │
       # │  6    = 强制 IPv6 优先                                  │
       # └─────────────────────────────────────────────────────────┘
-      - PREFER_IP=               # 留空=默认 | 4=IPv4优先 | 6=IPv6优先
+      - PREFER_IP=6               # 留空=默认 | 4=IPv4优先 | 6=IPv6优先
 
       - WARP_DEVICE_NAME=warp-docker  # 设备名（多容器时建议各自不同）
       - FORCE_REGISTER=false          # true = 强制重注册（换 IP 用）
