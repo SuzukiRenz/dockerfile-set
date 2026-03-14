@@ -62,8 +62,8 @@ services:
       - FORCE_REGISTER=false          # true = 强制重注册（换 IP 用）
       - TZ=Asia/Shanghai
 
-    volumes:
-      - warp-data:/warp/data    # 持久化账户（重启不重注册）
+    # volumes:
+      # - warp-data:/warp/data    # 持久化账户（重启不重注册）
 
     cap_add:
       - NET_ADMIN     # 必须：创建 TUN 虚拟网卡
