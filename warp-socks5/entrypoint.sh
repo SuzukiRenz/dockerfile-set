@@ -508,7 +508,8 @@ verify_and_filter() {
         if ! $CONNECTED; then
             red "WARP 连通失败"
             kill -15 "$(pgrep warp-go 2>/dev/null)" 2>/dev/null || true; sleep 3
-            "$WARPGO_BIN" --config="$WARPGO_CONF" &; WARPGO_PID=$!
+            "$WARPGO_BIN" --config="$WARPGO_CONF" &
+            WARPGO_PID=$!
             [[ $TRY -ge $MAX_TRY ]] && { red "超出最大重试次数"; return 1; }
             continue
         fi
@@ -547,7 +548,8 @@ verify_and_filter() {
         register_base_account
         write_conf "$WARP_ACCOUNT_TYPE"
 
-        "$WARPGO_BIN" --config="$WARPGO_CONF" &; WARPGO_PID=$!
+        "$WARPGO_BIN" --config="$WARPGO_CONF" &
+        WARPGO_PID=$!
         sleep 5
     done
 }
@@ -633,7 +635,9 @@ watchdog() {
         # warp-go 进程丢失
         if ! pgrep -x warp-go &>/dev/null; then
             yellow "[watchdog] warp-go 丢失，重启..."
-            "$WARPGO_BIN" --config="$WARPGO_CONF" &; WARPGO_PID=$!; sleep 10
+            "$WARPGO_BIN" --config="$WARPGO_CONF" &
+            WARPGO_PID=$!
+            sleep 10
         fi
 
         # 连通性检测（单次 API 调用）
@@ -646,13 +650,18 @@ watchdog() {
             FAIL=$((FAIL+1))
             yellow "[watchdog] 掉线 (${FAIL}/${MAX_FAIL})，重启..."
             kill -15 "$(pgrep warp-go)" 2>/dev/null || true; sleep 3
-            "$WARPGO_BIN" --config="$WARPGO_CONF" &; WARPGO_PID=$!; sleep 15
+            "$WARPGO_BIN" --config="$WARPGO_CONF" &
+            WARPGO_PID=$!
+            sleep 15
 
             if [[ $FAIL -ge $MAX_FAIL ]]; then
                 yellow "[watchdog] 连续失败，暂停 5 分钟..."
                 kill -15 "$(pgrep warp-go)" 2>/dev/null || true
                 sleep 300
-                "$WARPGO_BIN" --config="$WARPGO_CONF" &; WARPGO_PID=$!; sleep 15; FAIL=0
+                "$WARPGO_BIN" --config="$WARPGO_CONF" &
+                WARPGO_PID=$!
+                sleep 15
+                FAIL=0
             fi
             INTERVAL=$RETRY
         fi
