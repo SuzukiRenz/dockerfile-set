@@ -7,56 +7,65 @@ services:
     container_name: warp-socks5
     restart: unless-stopped
 
-    # ── 端口映射 ────────────────────────────────────────────────
     ports:
-      - "127.0.0.1:1080:1080"    # 仅本机访问（推荐）
-      # - "0.0.0.0:1080:1080"   # 局域网可访问，取消注释
+      - "127.0.0.1:1080:1080"   # 仅本机访问
+      # - "0.0.0.0:1080:1080"  # 局域网访问，取消注释
 
     environment:
-      # ── SOCKS5 代理设置 ───────────────────────────────────────
+      # ┌─────────────────────────────────────────────────────┐
+      # │  SOCKS5 代理设置                                    │
+      # └─────────────────────────────────────────────────────┘
       - SOCKS5_PORT=1080
-      - SOCKS5_USER=              # 留空 = 无需认证
+      - SOCKS5_USER=            # 留空 = 无需认证
       - SOCKS5_PASS=
 
-      # ── WARP 账户类型 ─────────────────────────────────────────
-      # 三选一，修改后设 FORCE_REGISTER=true 重启生效
-      #
-      #   free  → 免费账户，无需额外配置（默认）
-      #   plus  → WARP+ 付费账户，需填写 WARP_LICENSE_KEY
-      #   teams → Zero Trust 团队账户，需填写 WARP_TEAMS_TOKEN
+      # ┌─────────────────────────────────────────────────────┐
+      # │  WARP 账户类型（三选一）                            │
+      # │  free  : 免费账户，无限流量（默认）                 │
+      # │  plus  : WARP+，有 key 直接用，留空自动获取         │
+      # │  teams : Zero Trust，有 token 直接用，留空自动获取  │
+      # └─────────────────────────────────────────────────────┘
       - WARP_ACCOUNT_TYPE=free
 
-      # ── WARP+ 许可证密钥（账户类型为 plus 时填写）────────────
-      # 格式：xxxxxxxx-xxxxxxxx-xxxxxxxx（手机 WARP 客户端 → 账户 → 密钥）
+      # WARP+ 许可证密钥（type=plus 时生效）
+      # 格式：xxxxxxxx-xxxxxxxx-xxxxxxxx
+      # 留空则自动从公共池获取（不保证稳定，建议填自己的）
       - WARP_LICENSE_KEY=
 
-      # ── Zero Trust Token（账户类型为 teams 时填写）───────────
-      # 获取地址：https://web--public--warp-team-api--coia-mfs4.code.run/
+      # Zero Trust Token（type=teams 时生效）
+      # 获取：https://warp-token.cloudflare.now.cc/
+      # 留空则尝试自动获取公共 Token
       - WARP_TEAMS_TOKEN=
 
-      # ── 设备名称（多容器实例时建议各自不同）────────────────
-      - WARP_DEVICE_NAME=warp-docker
+      # ┌─────────────────────────────────────────────────────┐
+      # │  出口 IP 地区筛选                                   │
+      # │  留空 = 不限制，接受任何地区                        │
+      # │  单个 = "US"                                        │
+      # │  多个 = "US,JP,SG,HK"（随机接受其中任一）          │
+      # │  原理：注册新账户直到出口 IP 匹配目标地区           │
+      # └─────────────────────────────────────────────────────┘
+      - WARP_COUNTRIES=         # 例: US 或 US,JP,SG
+      - WARP_COUNTRY_RETRY=10   # 地区不匹配时最大重试次数
 
-      # ── 强制重新注册（换账户类型 / 换 IP 时设为 true）──────
-      - FORCE_REGISTER=false
-
+      # ┌─────────────────────────────────────────────────────┐
+      # │  其他设置                                           │
+      # └─────────────────────────────────────────────────────┘
+      - WARP_DEVICE_NAME=warp-docker  # 设备名（多实例时建议不同）
+      - FORCE_REGISTER=false          # true=强制重新注册（换 IP）
       - TZ=Asia/Shanghai
 
-    # ── 账户信息持久化 ───────────────────────────────────────────
     volumes:
-      - warp-data:/warp/data
+      - warp-data:/warp/data    # 持久化账户信息（重启不重注册）
 
-    # ── 权限 ────────────────────────────────────────────────────
     cap_add:
-      - NET_ADMIN    # 必须：创建虚拟网卡
-      - SYS_MKNOD    # 可选：宿主机无 /dev/net/tun 时自动创建
+      - NET_ADMIN     # 必须：创建虚拟网卡
+      - SYS_MKNOD     # 可选：宿主机无 /dev/net/tun 时自动创建
     devices:
       - /dev/net/tun:/dev/net/tun
     sysctls:
       - net.ipv4.conf.all.src_valid_mark=1
       - net.ipv6.conf.all.disable_ipv6=0
 
-    # ── 健康检查 ────────────────────────────────────────────────
     healthcheck:
       test: >
         bash -c 'curl -sx "socks5h://127.0.0.1:$${SOCKS5_PORT}"
@@ -65,7 +74,7 @@ services:
       interval: 60s
       timeout: 15s
       retries: 3
-      start_period: 90s
+      start_period: 120s
 
 volumes:
   warp-data:
