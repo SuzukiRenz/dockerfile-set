@@ -1,0 +1,47 @@
+x-common-config: &common-config
+  # 构建配置（如果需要从源码构建）
+  # build:
+  #   context: https://github.com/SuzukiRenz/nanobot.git#main
+  #   dockerfile: Dockerfile
+  image: suzukirenz/nanobot:latest
+  
+
+  volumes:
+    - ./config:/root/.nanobot
+    - /opt/1panel/docker/DATA/nanobot_data:/root/DATA #存放媒体文件
+    - /var/run/docker.sock:/var/run/docker.sock
+
+  # 方式①：env_file 注入（推荐，文件不入 git）
+  env_file:
+    - .env
+
+  # 方式②：environment 只放非敏感的固定值
+  environment:
+    - TZ=Asia/Shanghai
+
+  restart: unless-stopped
+
+services:
+  nanobot-gateway:
+    container_name: nanobot-gateway
+    <<: *common-config
+    command: ["gateway"]
+    ports:
+      - "18790:18790"
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 6G
+        reservations:
+          cpus: '2'
+          memory: 2G
+
+  nanobot-cli:
+    container_name: nanobot-cli
+    <<: *common-config
+    profiles:
+      - cli
+    command: ["status"]
+    stdin_open: true
+    tty: true
