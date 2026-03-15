@@ -1,0 +1,43 @@
+{
+  "providers": {
+    "custom": {
+      "api_key": "${CUSTOM_API_KEY}",
+      "api_base": "${CUSTOM_API_BASE}"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "workspace": "~/.nanobot/workspace",
+      "model": "grok-3",
+      "fallbackModels": [
+        "gemini/gemini-2.5-flash"
+      ],
+      "provider": "custom",
+      "temperature": 1.0,
+      "top_p": 0.9,
+      "max_tokens": 16384,
+      "max_tool_iterations": 120,
+      "fallbackStrategy": "auto",
+      "fallback": {
+        "enabled": true,
+        "healthCheckInterval": 300,
+        "maxResponseTime": 30,
+        "maxTimeoutRate": 0.2,
+        "maxErrorRate": 0.1
+      }
+    }
+  },
+  "channels": {
+    "qq": {
+      "enabled": true,
+      "appId": "${QQ_APP_ID}",
+      "secret": "${QQ_SECRET}",
+      "allowFrom": ["${QQ_ALLOW_FROM_1}", "${QQ_ALLOW_FROM_2}"]
+    },
+    "telegram": {
+      "enabled": true,
+      "token": "${TG_TOKEN}",
+      "allowFrom": ["${TG_ALLOW_FROM_1}", "${TG_ALLOW_FROM_2}"]
+    }
+  }
+}
