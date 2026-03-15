@@ -22,6 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     findutils \
     procps \
     python3 \
+    gpg \
     && rm -rf /var/lib/apt/lists/*
 
 # ─── 安装 rclone ──────────────────────────────────────────────────────────────
