@@ -1,22 +1,34 @@
 FROM suzukirenz/nanobot:latest
 
-# 用 sed 在 load_config 函数的 json.load 之前插入 expandvars 支持
 RUN python3 - <<'EOF'
-import re, pathlib
+import pathlib
 
-path = pathlib.Path("/usr/local/lib").glob("python3*/site-packages/nanobot/config/loader.py")
-loader = next(path)
-src = loader.read_text()
+# 两个路径都要patch
+paths = [
+    "/usr/local/lib/python3.12/site-packages/nanobot/config/loader.py",
+    "/app/nanobot/config/loader.py",
+]
 
-# 确保 import os 存在
-if "import os" not in src:
-    src = "import os\n" + src
+OLD = '''with open(path, encoding="utf-8") as f:
+                data = json.load(f)'''
 
-# 把  json.load(f)  替换为  json.loads(os.path.expandvars(f.read()))
-src = src.replace(
-    "with open(path) as f:\n        data = json.load(f)",
-    "with open(path) as f:\n        data = json.loads(os.path.expandvars(f.read()))"
-)
-loader.write_text(src)
-print(f"Patched: {loader}")
+NEW = '''with open(path, encoding="utf-8") as f:
+                data = json.loads(os.path.expandvars(f.read()))'''
+
+for p in paths:
+    loader = pathlib.Path(p)
+    if not loader.exists():
+        print(f"Skip (not found): {p}")
+        continue
+    src = loader.read_text()
+    if "expandvars" in src:
+        print(f"Already patched: {p}")
+        continue
+    if OLD not in src:
+        print(f"ERROR: pattern not found in {p}, check indentation!")
+        print(repr(src[src.find("json.load")-50:src.find("json.load")+80]))
+        continue
+    src = src.replace(OLD, NEW)
+    loader.write_text(src)
+    print(f"Patched OK: {p}")
 EOF
