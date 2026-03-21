@@ -56,11 +56,11 @@ RUN mkdir -p /data
 VOLUME ["/data"]
 
 # TOKEN/GUEST 不在此设默认值，避免 secrets 警告，统一由 docker-compose 传入
-ENV PORT="8080"
+ENV PORT="8787"
 
-EXPOSE 8080
+EXPOSE 8787
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD curl -sf http://localhost:8080/health || exit 1
+    CMD curl -sf http://localhost:8787/health || exit 1
 
 CMD ["/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/conf.d/services.conf"]
