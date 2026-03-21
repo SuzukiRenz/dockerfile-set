@@ -85,9 +85,9 @@ func loopbackOnly(next http.HandlerFunc) http.HandlerFunc {
 func waitForSubconverter(timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get("http://127.0.0.1:25500/version")
+		conn, err := net.DialTimeout("tcp", "127.0.0.1:25500", time.Second)
 		if err == nil {
-			resp.Body.Close()
+			conn.Close()
 			log.Println("subconverter ready")
 			return
 		}
