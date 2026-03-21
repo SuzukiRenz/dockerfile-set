@@ -344,7 +344,7 @@ func main() {
 	app := &App{
 		token: envOr("TOKEN", "change-me"),
 		guest: os.Getenv("GUEST"),
-		port:  envOr("PORT", "8080"),
+		port:  envOr("PORT", "8787"),
 	}
 	if app.token == "change-me" {
 		log.Println("WARNING: TOKEN is default – please change it")
