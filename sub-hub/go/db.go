@@ -1,11 +1,11 @@
 package main
 
 import (
-	"database/sql"
+	"encoding/json"
+	"os"
 	"strings"
+	"sync"
 	"time"
-
-	_ "modernc.org/sqlite"
 )
 
 // ── Models ────────────────────────────────────────────────────────────────────
@@ -19,195 +19,210 @@ type Node struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// ── Init ──────────────────────────────────────────────────────────────────────
+type Config struct {
+	SubName      string `json:"sub_name"`
+	SubConfigURL string `json:"subconfig_url"`
+}
 
-func initDB(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)")
-	if err != nil {
-		return nil, err
+type store struct {
+	Nodes  []Node `json:"nodes"`
+	Config Config `json:"config"`
+	NextID int64  `json:"next_id"`
+}
+
+// ── DB ────────────────────────────────────────────────────────────────────────
+
+type DB struct {
+	mu   sync.RWMutex
+	path string
+	data store
+}
+
+func initDB(path string) (*DB, error) {
+	db := &DB{
+		path: path,
+		data: store{
+			NextID: 1,
+			Config: Config{SubName: "My Subscription"},
+		},
 	}
-	db.SetMaxOpenConns(1)
 
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS nodes (
-			id         INTEGER PRIMARY KEY AUTOINCREMENT,
-			name       TEXT    NOT NULL DEFAULT '',
-			uri        TEXT    NOT NULL,
-			enabled    INTEGER NOT NULL DEFAULT 1,
-			sort_order INTEGER NOT NULL DEFAULT 0,
-			created_at TEXT    NOT NULL DEFAULT (datetime('now'))
-		);
-		CREATE TABLE IF NOT EXISTS config (
-			key   TEXT PRIMARY KEY,
-			value TEXT NOT NULL DEFAULT ''
-		);
-	`)
-	if err != nil {
-		return nil, err
+	b, err := os.ReadFile(path)
+	if err == nil {
+		json.Unmarshal(b, &db.data)
 	}
-
-	db.Exec(`INSERT OR IGNORE INTO config (key,value) VALUES
-		('sub_name',      'My Subscription'),
-		('subconfig_url', '')`)
-
+	// ensure defaults
+	if db.data.NextID == 0 {
+		db.data.NextID = 1
+	}
 	return db, nil
+}
+
+func (db *DB) save() error {
+	b, err := json.MarshalIndent(db.data, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(db.path, b, 0644)
 }
 
 // ── Node CRUD ─────────────────────────────────────────────────────────────────
 
-func getAllNodes(db *sql.DB) ([]Node, error) {
-	rows, err := db.Query(`
-		SELECT id, name, uri, enabled, sort_order, created_at
-		FROM nodes ORDER BY sort_order, id`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var nodes []Node
-	for rows.Next() {
-		var n Node
-		var enabled int
-		var ts string
-		rows.Scan(&n.ID, &n.Name, &n.URI, &enabled, &n.SortOrder, &ts)
-		n.Enabled = enabled == 1
-		n.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", ts)
-		nodes = append(nodes, n)
-	}
-	if nodes == nil {
-		nodes = []Node{}
-	}
-	return nodes, nil
+func getAllNodes(db *DB) ([]Node, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	out := make([]Node, len(db.data.Nodes))
+	copy(out, db.data.Nodes)
+	return out, nil
 }
 
-func getEnabledNodes(db *sql.DB) ([]Node, error) {
-	rows, err := db.Query(`
-		SELECT id, name, uri FROM nodes
-		WHERE enabled=1 ORDER BY sort_order, id`)
-	if err != nil {
-		return nil, err
+func getEnabledNodes(db *DB) ([]Node, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	var out []Node
+	for _, n := range db.data.Nodes {
+		if n.Enabled {
+			out = append(out, n)
+		}
 	}
-	defer rows.Close()
-
-	var nodes []Node
-	for rows.Next() {
-		var n Node
-		rows.Scan(&n.ID, &n.Name, &n.URI)
-		nodes = append(nodes, n)
-	}
-	return nodes, nil
+	return out, nil
 }
 
-func createNode(db *sql.DB, n *Node) error {
-	var maxOrder int
-	db.QueryRow(`SELECT COALESCE(MAX(sort_order),0) FROM nodes`).Scan(&maxOrder)
-	n.SortOrder = maxOrder + 1
+func createNode(db *DB, n *Node) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	n.ID = db.data.NextID
+	db.data.NextID++
 	n.Enabled = true
-
-	res, err := db.Exec(
-		`INSERT INTO nodes (name,uri,enabled,sort_order) VALUES (?,?,?,?)`,
-		n.Name, n.URI, 1, n.SortOrder)
-	if err != nil {
-		return err
+	n.SortOrder = len(db.data.Nodes)
+	n.CreatedAt = time.Now()
+	if n.Name == "" {
+		n.Name = extractName(n.URI)
 	}
-	n.ID, _ = res.LastInsertId()
-	return nil
+	db.data.Nodes = append(db.data.Nodes, *n)
+	return db.save()
 }
 
-func batchCreateNodes(db *sql.DB, raw string) (int, error) {
-	var maxOrder int
-	db.QueryRow(`SELECT COALESCE(MAX(sort_order),0) FROM nodes`).Scan(&maxOrder)
-
-	tx, err := db.Begin()
-	if err != nil {
-		return 0, err
-	}
-	stmt, err := tx.Prepare(
-		`INSERT INTO nodes (name,uri,enabled,sort_order) VALUES (?,?,1,?)`)
-	if err != nil {
-		tx.Rollback()
-		return 0, err
-	}
-	defer stmt.Close()
-
+func batchCreateNodes(db *DB, raw string) (int, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
 	count := 0
 	for _, line := range strings.Split(raw, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		name := ""
-		if idx := strings.LastIndex(line, "#"); idx != -1 {
-			name = line[idx+1:]
+		n := Node{
+			ID:        db.data.NextID,
+			URI:       line,
+			Name:      extractName(line),
+			Enabled:   true,
+			SortOrder: len(db.data.Nodes),
+			CreatedAt: time.Now(),
 		}
-		maxOrder++
-		if _, err := stmt.Exec(name, line, maxOrder); err == nil {
-			count++
-		}
+		db.data.NextID++
+		db.data.Nodes = append(db.data.Nodes, n)
+		count++
 	}
-
-	if err := tx.Commit(); err != nil {
-		return 0, err
+	if count > 0 {
+		db.save()
 	}
 	return count, nil
 }
 
-func updateNode(db *sql.DB, n *Node) error {
-	_, err := db.Exec(
-		`UPDATE nodes SET name=?,uri=?,enabled=?,sort_order=? WHERE id=?`,
-		n.Name, n.URI, boolInt(n.Enabled), n.SortOrder, n.ID)
-	return err
-}
-
-func deleteNode(db *sql.DB, id int64) error {
-	_, err := db.Exec(`DELETE FROM nodes WHERE id=?`, id)
-	return err
-}
-
-func reorderNodes(db *sql.DB, ids []int64) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
+func updateNode(db *DB, n *Node) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	for i, existing := range db.data.Nodes {
+		if existing.ID == n.ID {
+			n.CreatedAt = existing.CreatedAt
+			if n.Name == "" {
+				n.Name = extractName(n.URI)
+			}
+			db.data.Nodes[i] = *n
+			return db.save()
+		}
 	}
+	return nil
+}
+
+func deleteNode(db *DB, id int64) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	nodes := db.data.Nodes[:0]
+	for _, n := range db.data.Nodes {
+		if n.ID != id {
+			nodes = append(nodes, n)
+		}
+	}
+	db.data.Nodes = nodes
+	return db.save()
+}
+
+func reorderNodes(db *DB, ids []int64) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	idx := make(map[int64]int, len(ids))
 	for i, id := range ids {
-		tx.Exec(`UPDATE nodes SET sort_order=? WHERE id=?`, i, id)
+		idx[id] = i
 	}
-	return tx.Commit()
+	nodes := make([]Node, len(db.data.Nodes))
+	copy(nodes, db.data.Nodes)
+	for i := range nodes {
+		if order, ok := idx[nodes[i].ID]; ok {
+			nodes[i].SortOrder = order
+		}
+	}
+	// stable sort by SortOrder
+	for i := 1; i < len(nodes); i++ {
+		for j := i; j > 0 && nodes[j].SortOrder < nodes[j-1].SortOrder; j-- {
+			nodes[j], nodes[j-1] = nodes[j-1], nodes[j]
+		}
+	}
+	db.data.Nodes = nodes
+	return db.save()
 }
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-func getConfig(db *sql.DB, key string) (string, error) {
-	var v string
-	err := db.QueryRow(`SELECT value FROM config WHERE key=?`, key).Scan(&v)
-	return v, err
+func getConfig(db *DB, key string) (string, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	switch key {
+	case "sub_name":
+		return db.data.Config.SubName, nil
+	case "subconfig_url":
+		return db.data.Config.SubConfigURL, nil
+	}
+	return "", nil
 }
 
-func setConfig(db *sql.DB, key, value string) error {
-	_, err := db.Exec(`INSERT OR REPLACE INTO config (key,value) VALUES (?,?)`, key, value)
-	return err
+func setConfig(db *DB, key, value string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	switch key {
+	case "sub_name":
+		db.data.Config.SubName = value
+	case "subconfig_url":
+		db.data.Config.SubConfigURL = value
+	}
+	return db.save()
 }
 
-func getAllConfig(db *sql.DB) (map[string]string, error) {
-	rows, err := db.Query(`SELECT key,value FROM config`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	m := make(map[string]string)
-	for rows.Next() {
-		var k, v string
-		rows.Scan(&k, &v)
-		m[k] = v
-	}
-	return m, nil
+func getAllConfig(db *DB) (map[string]string, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	return map[string]string{
+		"sub_name":      db.data.Config.SubName,
+		"subconfig_url": db.data.Config.SubConfigURL,
+	}, nil
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-func boolInt(b bool) int {
-	if b {
-		return 1
+func extractName(uri string) string {
+	if idx := strings.LastIndex(uri, "#"); idx != -1 {
+		return uri[idx+1:]
 	}
-	return 0
+	return ""
 }
