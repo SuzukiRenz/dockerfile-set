@@ -364,7 +364,7 @@ func main() {
 	mux.HandleFunc("/internal/nodes", loopbackOnly(app.handleInternalNodes))
 	mux.HandleFunc("/sub", app.subAuth(app.handleSub))
 	mux.HandleFunc("/", app.subAuth(app.handleSub))
-	mux.HandleFunc("/admin", app.adminOnly(app.handleAdmin))
+	mux.HandleFunc("/admin", app.handleAdmin)
 	mux.HandleFunc("/api/nodes", app.adminOnly(app.apiNodes))
 	mux.HandleFunc("/api/nodes/", app.adminOnly(app.apiNodes))
 	mux.HandleFunc("/api/config", app.adminOnly(app.apiConfig))
