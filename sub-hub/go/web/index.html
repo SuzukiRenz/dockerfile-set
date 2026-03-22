@@ -276,7 +276,9 @@ async function login() {
 }
 
 window.addEventListener('load', async () => {
-  const saved = localStorage.getItem('sub_token');
+  // 优先从 URL ?token= 读取，其次从 localStorage
+  const urlToken = new URLSearchParams(window.location.search).get('token');
+  const saved = urlToken || localStorage.getItem('sub_token');
   if (saved) {
     document.getElementById('token-input').value = saved;
     await login();
