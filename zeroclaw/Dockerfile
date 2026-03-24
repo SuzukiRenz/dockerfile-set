@@ -1,5 +1,6 @@
 FROM ghcr.io/zeroclaw-labs/zeroclaw:debian
 
+USER root
 # 安装基础依赖
 RUN apt update && apt install -y \
     curl \
