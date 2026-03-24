@@ -5,22 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>订阅管理</title>
 <style>
-:root {
-  --bg:      #0d1117;
-  --bg2:     #161b22;
-  --bg3:     #21262d;
-  --bg4:     #30363d;
-  --border:  #30363d;
-  --text:    #e6edf3;
-  --text2:   #8b949e;
-  --accent:  #58a6ff;
-  --accent2: #1f6feb;
-  --green:   #3fb950;
-  --red:     #f85149;
-  --yellow:  #d29922;
-  --radius:  8px;
-  --shadow:  0 1px 3px rgba(0,0,0,.4);
-}
+:root { --bg:#0d1117; --bg2:#161b22; --bg3:#21262d; --bg4:#30363d; --border:#30363d; --text:#e6edf3; --text2:#8b949e; --accent:#58a6ff; --accent2:#1f6feb; --green:#3fb950; --red:#f85149; --yellow:#d29922; --radius:8px; --shadow:0 1px 3px rgba(0,0,0,.4); }
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--text);font:14px/1.5 "Segoe UI",system-ui,sans-serif;min-height:100vh}
 a{color:var(--accent);text-decoration:none}
@@ -258,17 +243,16 @@ let nodes  = [];
 let config = {};
 
 function getBase() {
-  // Derive base path so that if the app is served under a subpath like /sub-hub/,
-  // API calls use /sub-hub/api/... instead of /api/...
+  // 支持子路径 /sub-hub/admin → /sub-hub/api/...
   const p = window.location.pathname;
   const i = p.lastIndexOf('/admin');
   if (i >= 0) {
-    const base = p.slice(0, i + 1); // keep trailing slash
+    const base = p.slice(0, i + 1); // 保留结尾 /
     return base || '/';
   }
   return p.endsWith('/') ? p : p + '/';
 }
- 
+
 async function login() {
   const t = document.getElementById('token-input').value.trim();
   if (!t) return;
@@ -294,7 +278,6 @@ async function login() {
   }
 }
 
-
 window.addEventListener('load', async () => {
   // 优先从 URL ?token= 读取，其次从 localStorage
   const urlToken = new URLSearchParams(window.location.search).get('token');
@@ -306,7 +289,7 @@ window.addEventListener('load', async () => {
   document.getElementById('token-input').addEventListener('keydown', e => {
     if (e.key === 'Enter') login();
   });
-  // 如果在子路径 /sub-hub/admin 打开，自动纠正链接展示
+  // 子路径场景下修正链接展示
   renderLinks();
 });
 
@@ -317,7 +300,6 @@ async function api(method, path, body) {
     headers: { Authorization: 'Bearer ' + TOKEN, 'Content-Type': 'application/json' },
   };
   if (body !== undefined) opts.body = JSON.stringify(body);
-  // Add ?token= to URL for reverse proxy compatibility, while also sending Authorization header
   const url = path.startsWith('http') ? path : `${base}${path.replace(/^\//,'')}`;
   const sep = url.includes('?') ? '&' : '?';
   const finalUrl = `${url}${sep}token=${encodeURIComponent(TOKEN)}`;
@@ -328,13 +310,12 @@ async function api(method, path, body) {
   }
   return r.json();
 }
- 
+
 async function loadNodes() {
   nodes = await api('GET', '/api/nodes');
   renderNodes();
   updateStats();
 }
-
 
 function updateStats() {
   const enabled = nodes.filter(n => n.enabled).length;
@@ -346,4 +327,112 @@ function updateStats() {
 function renderNodes() {
   const tbody = document.getElementById('nodes-tbody');
   const empty = document.getElementById('nodes-empty');
-  if (!nodes.le
+  if (!nodes.length) {
+    tbody.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+  tbody.innerHTML = nodes.map((n, idx) => `
+    <tr data-id="${n.id}">
+      <td class="drag-handle">⋮⋮</td>
+      <td class="name-cell">${n.name || ''}</td>
+      <td class="uri-cell" title="${n.uri}">${n.uri}</td>
+      <td>
+        <label class="toggle">
+          <input type="checkbox" ${n.enabled ? 'checked' : ''} onchange="toggleNodeEnabled('${n.id}', this.checked)">
+          <span class="slider"></span>
+        </label>
+      </td>
+      <td>
+        <button class="btn-icon" title="编辑" onclick="editNode('${n.id}')">✎</button>
+        <button class="btn-icon" title="删除" onclick="deleteNode('${n.id}')">🗑️</button>
+      </td>
+    </tr>`).join('');
+}
+
+async function saveConfig() {
+  const subName = document.getElementById('cfg-sub-name').value.trim();
+  const subCfg  = document.getElementById('cfg-subconfig').value.trim();
+  await api('POST', '/api/config', { sub_name: subName, subconfig_url: subCfg });
+  toast('已保存');
+}
+
+function applyConfig() {
+  document.getElementById('cfg-sub-name').value = config.sub_name || '';
+  document.getElementById('cfg-subconfig').value = config.subconfig_url || '';
+}
+
+function showPage(name, btn) {
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  btn && btn.classList.add('active');
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+}
+
+function renderLinks() {
+  const host = document.getElementById('links-host');
+  if (!host.value) host.value = location.origin;
+  const use = document.getElementById('links-token').value;
+  const tk  = use === 'admin' ? TOKEN : (config.guest || '');
+  const tbody = document.querySelector('#links-table tbody');
+  const base = getBase();
+  const subBase = host.value.replace(/\/$/, '') + base;
+  const url = `${subBase}sub?token=${encodeURIComponent(tk)}`;
+  const clash = `${url}&target=clash`;
+  const surge = `${url}&target=surge`;
+  const quanx = `${url}&target=quantumultx`;
+  tbody.innerHTML = `
+    <tr><td class="link-label">原始（Base64）</td><td class="link-url">${url}</td></tr>
+    <tr><td class="link-label">Clash</td><td class="link-url">${clash}</td></tr>
+    <tr><td class="link-label">Surge</td><td class="link-url">${surge}</td></tr>
+    <tr><td class="link-label">Quantumult X</td><td class="link-url">${quanx}</td></tr>`;
+}
+
+function toast(msg) {
+  const t = document.createElement('div');
+  t.className = 'toast';
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 1600);
+}
+
+function openAddModal() { document.getElementById('modal-id').value=''; document.getElementById('modal-uri').value=''; document.getElementById('modal-name').value=''; openModal('node-modal'); }
+function openBatchModal() { document.getElementById('batch-input').value=''; openModal('batch-modal'); }
+function openModal(id){ document.getElementById(id).classList.add('open'); }
+function closeModal(id){ document.getElementById(id).classList.remove('open'); }
+
+async function saveNode(){
+  const id = document.getElementById('modal-id').value;
+  const uri = document.getElementById('modal-uri').value.trim();
+  const name = document.getElementById('modal-name').value.trim();
+  if (!uri) return toast('请填写节点 URI');
+  if (id) await api('PUT', `/api/nodes/${id}`, { uri, name });
+  else    await api('POST','/api/nodes', { uri, name });
+  closeModal('node-modal');
+  await loadNodes();
+}
+
+async function deleteNode(id){
+  await api('DELETE', `/api/nodes/${id}`);
+  await loadNodes();
+}
+
+async function editNode(id){
+  const n = nodes.find(x=>x.id===id);
+  if (!n) return;
+  document.getElementById('modal-id').value = id;
+  document.getElementById('modal-uri').value = n.uri;
+  document.getElementById('modal-name').value = n.name || '';
+  document.getElementById('modal-title').textContent = '编辑节点';
+  openModal('node-modal');
+}
+
+async function toggleNodeEnabled(id, val){
+  await api('PATCH', `/api/nodes/${id}`, { enabled: !!val });
+  const n = nodes.find(x=>x.id===id); if (n) n.enabled = !!val;
+  updateStats();
+}
+</script>
+</body>
+</html>
