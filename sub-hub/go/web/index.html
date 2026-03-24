@@ -333,8 +333,8 @@ function renderNodes() {
     return;
   }
   empty.style.display = 'none';
-  tbody.innerHTML = nodes.map((n, idx) => `
-    <tr data-id="${n.id}">
+  tbody.innerHTML = nodes.map((n) => `
+    <tr data-id="${n.id}" draggable="true" ondragstart="onDragStart(event)" ondragover="onDragOver(event)" ondrop="onDrop(event)">
       <td class="drag-handle">⋮⋮</td>
       <td class="name-cell">${n.name || ''}</td>
       <td class="uri-cell" title="${n.uri}">${n.uri}</td>
@@ -351,10 +351,40 @@ function renderNodes() {
     </tr>`).join('');
 }
 
+let dragId = null;
+function onDragStart(e){
+  const tr = e.currentTarget;
+  dragId = tr.dataset.id;
+  e.dataTransfer.effectAllowed = 'move';
+}
+function onDragOver(e){
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+}
+async function onDrop(e){
+  e.preventDefault();
+  const targetId = e.currentTarget.dataset.id;
+  if (!dragId || dragId === targetId) return;
+  const from = nodes.findIndex(n => String(n.id) === String(dragId));
+  const to   = nodes.findIndex(n => String(n.id) === String(targetId));
+  if (from < 0 || to < 0) return;
+  const moved = nodes.splice(from, 1)[0];
+  nodes.splice(to, 0, moved);
+  renderNodes();
+  updateStats();
+  try {
+    const ids = nodes.map(n => Number(n.id));
+    await api('POST', '/api/nodes/reorder', ids);
+    toast('已重新排序');
+  } catch (err) {
+    toast('排序保存失败：' + (err && err.message ? err.message : '未知错误'));
+  }
+}
+
 async function saveConfig() {
   const subName = document.getElementById('cfg-sub-name').value.trim();
   const subCfg  = document.getElementById('cfg-subconfig').value.trim();
-  await api('POST', '/api/config', { sub_name: subName, subconfig_url: subCfg });
+  await api('PUT', '/api/config', { sub_name: subName, subconfig_url: subCfg });
   toast('已保存');
 }
 
@@ -406,16 +436,26 @@ async function saveNode(){
   const id = document.getElementById('modal-id').value;
   const uri = document.getElementById('modal-uri').value.trim();
   const name = document.getElementById('modal-name').value.trim();
-  if (!uri) return toast('请填写节点 URI');
-  if (id) await api('PUT', `/api/nodes/${id}`, { uri, name });
-  else    await api('POST','/api/nodes', { uri, name });
-  closeModal('node-modal');
-  await loadNodes();
+  if (!uri) { toast('请填写节点 URI'); return; }
+  try {
+    if (id) await api('PUT', `/api/nodes/${id}`, { uri, name });
+    else    await api('POST','/api/nodes', { uri, name });
+    toast('已保存');
+    closeModal('node-modal');
+    await loadNodes();
+  } catch (e) {
+    toast('保存失败：' + (e && e.message ? e.message : '未知错误'));
+  }
 }
 
 async function deleteNode(id){
-  await api('DELETE', `/api/nodes/${id}`);
-  await loadNodes();
+  try {
+    await api('DELETE', `/api/nodes/${id}`);
+    toast('已删除');
+    await loadNodes();
+  } catch (e) {
+    toast('删除失败：' + (e && e.message ? e.message : '未知错误'));
+  }
 }
 
 async function editNode(id){
