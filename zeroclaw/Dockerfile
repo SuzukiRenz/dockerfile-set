@@ -19,6 +19,6 @@ RUN apt update && apt install -y \
 # 创建技能目录
 RUN mkdir -p /zeroclaw-data/workspace/skills
 
-WORKDIR /root
+WORKDIR /zeroclaw-data
 
 CMD ["zeroclaw"]
