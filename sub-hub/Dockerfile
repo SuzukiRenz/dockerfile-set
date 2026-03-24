@@ -44,6 +44,8 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         supervisor \
         ca-certificates \
+        libstdc++6 \
+        libgcc-s1 \
         curl && \
     rm -rf /var/lib/apt/lists/*
 
