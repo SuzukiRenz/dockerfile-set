@@ -35,7 +35,9 @@ RUN git clone --depth=1 --branch main \
 RUN go mod download
 
 # 静态编译：CGO_ENABLED=0 生成无外部 .so 依赖的二进制，方便在 Alpine 运行
-RUN CGO_ENABLED=0 GOOS=linux make build
+RUN CGO_ENABLED=0 GOOS=linux make build && \
+    mkdir -p /build/bin && \
+    mv build/picoclaw-linux-* /build/bin/picoclaw
 
 
 # -----------------------------------------------------------------------------
