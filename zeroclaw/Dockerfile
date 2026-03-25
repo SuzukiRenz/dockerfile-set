@@ -33,12 +33,7 @@ ENV PIP_NO_CACHE_DIR=1 \
 
 # 预建技能目录结构
 RUN mkdir -p \
-    /zeroclaw-data/workspace/skills \
-    /zeroclaw-data/workspace/memory \
-    /zeroclaw-data/workspace/logs \
-    /zeroclaw-data/workspace/backups \
-    /zeroclaw-data/workspace/temp \
-    /zeroclaw-data/.zeroclaw \
+    /zeroclaw-data \
     && chown -R 65534:65534 /zeroclaw-data
 
 # 4. 切换回原镜像的非 root 用户
