@@ -19,7 +19,7 @@
 # 阶段一：Builder
 # 在容器内拉取远程仓库并编译，宿主机无需安装 Go 工具链
 # -----------------------------------------------------------------------------
-FROM golang:1.23-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 # git：从 GitHub 克隆源码；make：执行项目构建脚本
 RUN apk add --no-cache git make
