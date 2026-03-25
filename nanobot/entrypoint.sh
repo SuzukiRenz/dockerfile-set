@@ -22,6 +22,17 @@ else
   git reset --hard origin/main
 fi
 
+if [ "$OLD_HEAD" != "$NEW_HEAD" ]; then
+  echo "=== [nanobot] Reinstalling Python package... ==="
+  uv pip install --system --no-cache .
+
+  # bridge 有变动才重新编译
+  if git diff --name-only "$OLD_HEAD" "$NEW_HEAD" | grep -q "^bridge/"; then
+    echo "=== [nanobot] Bridge changed, rebuilding... ==="
+    cd /app/bridge && npm install && npm run build && cd /app
+  fi
+fi
+
 NEW_HEAD=$(git rev-parse HEAD)
 
 if [ "$OLD_HEAD" != "$NEW_HEAD" ]; then
