@@ -1,0 +1,173 @@
+# =============================================================================
+# PicoClaw — docker-compose.full.yml
+# Full 版 Compose 配置（基于本地构建的 picoclaw:full 镜像）
+#
+# 三个 Profile，按需启动，互不干扰：
+#   gateway  → 长期运行的 Bot 服务（自动重启，推荐生产使用）
+#   agent    → 一次性任务 / 交互式会话
+#   launcher → 带 Web UI 的 Gateway（浏览器操作配置和聊天）
+#
+# 首次部署流程：
+#   1. docker compose -f docker-compose.full.yml --profile gateway up
+#      （容器生成 ./data/config.json 后自动退出，打印 "First-run setup complete."）
+#   2. vim ./data/config.json   # 填写 API Key、Bot Token 等
+#   3. docker compose -f docker-compose.full.yml --profile gateway up -d
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # 服务：picoclaw-gateway（Profile: gateway）
+  # 长期运行的 Bot Gateway，接收来自 Telegram/Discord/WeCom 等频道的消息
+  # ---------------------------------------------------------------------------
+  picoclaw-gateway:
+    # 使用本地构建的 Full 镜像；如需使用官方预构建镜像可改为：
+    #   image: docker.io/sipeed/picoclaw:full
+    #build:
+      #context: .
+      #dockerfile: Dockerfile.full
+    image: suzukirenz/picoclaw:latest         # 构建完成后打上此标签，方便复用
+
+    container_name: picoclaw-gateway
+
+    # 仅在使用 --profile gateway 时启动此服务
+    profiles: [gateway]
+
+    # 非零退出时自动重启（普通停止如 Ctrl+C 不触发重启）
+    restart: on-failure
+
+    # ── 环境变量 ──────────────────────────────────────────────────────────────
+    environment:
+      # 让 Gateway 健康检查端口监听所有接口，否则容器外无法访问 /health
+      - PICOCLAW_GATEWAY_HOST=0.0.0.0
+      # 容器时区（与 Dockerfile 默认值一致，可按需修改）
+      - TZ=Asia/Shanghai
+      # 心跳功能开关（false = 关闭，节省资源；true = 定期发送在线心跳）
+      - PICOCLAW_HEARTBEAT_ENABLED=false
+      # 心跳间隔（分钟），仅 HEARTBEAT_ENABLED=true 时生效
+      - PICOCLAW_HEARTBEAT_INTERVAL=60
+      # 是否将 Agent 沙箱限制在 workspace 目录内（生产环境建议 true）
+      - PICOCLAW_AGENTS_DEFAULTS_RESTRICT_TO_WORKSPACE=false
+
+    # ── 持久化卷 ──────────────────────────────────────────────────────────────
+    # 宿主机 ./data → 容器 /root/.picoclaw
+    # 包含：config.json、workspace/（session、memory、cron、skill）
+    # 警告：删除此目录会丢失所有配置和会话历史
+    volumes:
+      - ./data:/root/.picoclaw
+
+    # ── 端口映射 ──────────────────────────────────────────────────────────────
+    # 仅映射需要的端口，其余注释掉以减少攻击面
+    ports:
+      # 健康检查探针（存活 /health、就绪 /ready）
+      - "18790:18790"
+      # LINE webhook（未使用 LINE 频道时注释掉）
+      # - "18791:18791"
+      # WeCom App webhook（未使用时注释掉）
+      # - "18792:18792"
+      # WeCom Bot webhook（未使用时注释掉）
+      # - "18793:18793"
+
+    # ── 健康检查（Compose 层，补充 Dockerfile 内的 HEALTHCHECK）────────────────
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:18790/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    # ── 日志配置 ──────────────────────────────────────────────────────────────
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"   # 单个日志文件最大 10MB
+        max-file: "3"     # 保留最近 3 个日志文件
+
+
+  # ---------------------------------------------------------------------------
+  # 服务：picoclaw-agent（Profile: agent）
+  # 一次性查询或交互式会话，运行完毕后自动删除容器
+  #
+  # 使用示例：
+  #   单次提问：  docker compose -f docker-compose.full.yml run --rm picoclaw-agent -m "你好"
+  #   交互模式：  docker compose -f docker-compose.full.yml run --rm picoclaw-agent
+  # ---------------------------------------------------------------------------
+  picoclaw-agent:
+    #build:
+      #context: .
+      #dockerfile: Dockerfile
+    image: suzukirenz/picoclaw:latest  
+
+    container_name: picoclaw-agent
+
+    profiles: [agent]
+
+    # Agent 模式不需要自动重启（一次性任务）
+    restart: "no"
+
+    # 覆盖默认入口，直接运行 agent 子命令
+    entrypoint: ["picoclaw", "agent"]
+
+    environment:
+      - TZ=Asia/Shanghai
+      - PICOCLAW_AGENTS_DEFAULTS_RESTRICT_TO_WORKSPACE=false
+
+    # 与 gateway 共享同一份数据（共享 config.json 和 workspace）
+    volumes:
+      - ./data:/root/.picoclaw
+
+    # 交互模式：启用终端和标准输入，支持 REPL 会话
+    stdin_open: true
+    tty: true
+
+
+  # ---------------------------------------------------------------------------
+  # 服务：picoclaw-launcher（Profile: launcher）
+  # 带 Web UI 的 Gateway，在浏览器中进行配置和聊天
+  # 访问地址：http://localhost:18800
+  #
+  # 启动命令：
+  #   docker compose -f docker-compose.full.yml --profile launcher up -d
+  # ---------------------------------------------------------------------------
+  picoclaw-launcher:
+    #build:
+      #context: .
+      #dockerfile: Dockerfile.full
+    image: suzukirenz/picoclaw:latest  
+
+    container_name: picoclaw-launcher
+
+    profiles: [launcher]
+
+    restart: on-failure
+
+    # launcher 子命令同时启动 gateway + Web UI 服务
+    command: ["picoclaw", "launcher"]
+
+    environment:
+      # 必须监听 0.0.0.0，否则宿主机浏览器无法访问 Web UI
+      - PICOCLAW_GATEWAY_HOST=0.0.0.0
+      - TZ=Asia/Shanghai
+      - PICOCLAW_HEARTBEAT_ENABLED=false
+
+    volumes:
+      - ./data:/root/.picoclaw
+
+    ports:
+      # Web UI Launcher 面板（浏览器访问 http://localhost:18800）
+      - "18800:18800"
+      # 健康检查端口（可选，监控用）
+      # - "18790:18790"
+
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:18790/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
