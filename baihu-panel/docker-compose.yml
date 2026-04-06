@@ -1,5 +1,7 @@
 services:
   baihu:
+    container_name: baihu
+    image: suzukirenz/baihu-panel:latest 
     #build:
       #context: .
       #dockerfile: docker/Dockerfile
