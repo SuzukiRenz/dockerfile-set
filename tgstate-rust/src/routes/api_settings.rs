@@ -1,0 +1,371 @@
+use std::sync::Arc;
+
+use axum::extract::State;
+use axum::http::HeaderMap;
+use axum::response::IntoResponse;
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use serde::Deserialize;
+
+use crate::auth;
+use crate::config;
+use crate::database;
+use crate::error::http_error;
+use crate::state::{self, AppState};
+
+#[derive(Deserialize)]
+pub struct PasswordRequest {
+    password: String,
+}
+
+#[derive(Deserialize)]
+pub struct AppConfigRequest {
+    #[serde(rename = "BOT_TOKEN")]
+    bot_token: Option<String>,
+    #[serde(rename = "CHANNEL_NAME")]
+    channel_name: Option<String>,
+    #[serde(rename = "PASS_WORD")]
+    pass_word: Option<String>,
+    #[serde(rename = "BASE_URL")]
+    base_url: Option<String>,
+    #[serde(rename = "PICGO_API_KEY")]
+    picgo_api_key: Option<String>,
+    #[serde(rename = "STORAGE_BACKEND")]
+    storage_backend: Option<String>,
+    #[serde(rename = "S3_ENDPOINT")]
+    s3_endpoint: Option<String>,
+    #[serde(rename = "S3_REGION")]
+    s3_region: Option<String>,
+    #[serde(rename = "S3_BUCKET")]
+    s3_bucket: Option<String>,
+    #[serde(rename = "S3_ACCESS_KEY")]
+    s3_access_key: Option<String>,
+    #[serde(rename = "S3_SECRET_KEY")]
+    s3_secret_key: Option<String>,
+    #[serde(rename = "S3_PUBLIC_BASE_URL")]
+    s3_public_base_url: Option<String>,
+    #[serde(rename = "WEBDAV_ENABLED")]
+    webdav_enabled: Option<String>,
+    #[serde(rename = "WEBDAV_READONLY")]
+    webdav_readonly: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct VerifyRequest {
+    #[serde(rename = "BOT_TOKEN")]
+    bot_token: Option<String>,
+    #[serde(rename = "CHANNEL_NAME")]
+    channel_name: Option<String>,
+}
+
+fn validate_config(
+    cfg: &std::collections::HashMap<String, Option<String>>,
+) -> Result<(), (axum::http::StatusCode, &'static str, &'static str)> {
+    if let Some(Some(token)) = cfg.get("BOT_TOKEN") {
+        let t = token.trim();
+        if !t.is_empty() && (!t.contains(':') || t.len() < 20) {
+            return Err((axum::http::StatusCode::BAD_REQUEST, "BOT_TOKEN 格式不正确", "invalid_bot_token"));
+        }
+    }
+    if let Some(Some(channel)) = cfg.get("CHANNEL_NAME") {
+        let c = channel.trim();
+        if !c.is_empty() && !c.starts_with('@') && !c.starts_with("-100") {
+            return Err((axum::http::StatusCode::BAD_REQUEST, "CHANNEL_NAME 格式不正确（@username 或 -100...）", "invalid_channel"));
+        }
+    }
+    if let Some(Some(url)) = cfg.get("BASE_URL") {
+        let u = url.trim();
+        if !u.is_empty() && !u.starts_with("http://") && !u.starts_with("https://") {
+            return Err((axum::http::StatusCode::BAD_REQUEST, "BASE_URL 必须以 http:// 或 https:// 开头", "invalid_base_url"));
+        }
+    }
+    if let Some(Some(backend)) = cfg.get("STORAGE_BACKEND") {
+        let b = backend.trim();
+        if !b.is_empty() && b != "telegram" && b != "s3" {
+            return Err((axum::http::StatusCode::BAD_REQUEST, "STORAGE_BACKEND 仅支持 telegram 或 s3", "invalid_storage_backend"));
+        }
+    }
+    if let Some(Some(endpoint)) = cfg.get("S3_ENDPOINT") {
+        let e = endpoint.trim();
+        if !e.is_empty() && !e.starts_with("http://") && !e.starts_with("https://") {
+            return Err((axum::http::StatusCode::BAD_REQUEST, "S3_ENDPOINT 必须以 http:// 或 https:// 开头", "invalid_s3_endpoint"));
+        }
+    }
+    for key in ["WEBDAV_ENABLED", "WEBDAV_READONLY"] {
+        if let Some(Some(v)) = cfg.get(key) {
+            let v = v.trim();
+            if !v.is_empty() && !matches!(v, "0" | "1" | "true" | "false") {
+                return Err((axum::http::StatusCode::BAD_REQUEST, "WebDAV 开关仅支持 0/1/true/false", "invalid_webdav_flag"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn merge_config(
+    existing: &std::collections::HashMap<String, Option<String>>,
+    incoming: &AppConfigRequest,
+) -> Result<std::collections::HashMap<String, Option<String>>, (axum::http::StatusCode, &'static str, &'static str)> {
+    let mut result = existing.clone();
+
+    macro_rules! set_opt {
+        ($field:expr, $key:literal) => {
+            if let Some(ref v) = $field {
+                let v = v.trim().to_string();
+                result.insert($key.into(), if v.is_empty() { None } else { Some(v) });
+            }
+        };
+    }
+
+    set_opt!(incoming.bot_token, "BOT_TOKEN");
+    set_opt!(incoming.channel_name, "CHANNEL_NAME");
+
+    if let Some(ref v) = incoming.pass_word {
+        let v = v.trim().to_string();
+        if v.is_empty() {
+            result.insert("PASS_WORD".into(), None);
+            result.insert("SESSION_TOKEN".into(), None);
+        } else {
+            match auth::hash_password(&v) {
+                Ok(hashed) => {
+                    result.insert("PASS_WORD".into(), Some(hashed));
+                    result.insert("SESSION_TOKEN".into(), Some(auth::generate_session_token()));
+                }
+                Err(e) => {
+                    tracing::error!("密码哈希失败: {}", e);
+                    return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, "密码哈希失败", "hash_error"));
+                }
+            }
+        }
+    }
+
+    set_opt!(incoming.base_url, "BASE_URL");
+    set_opt!(incoming.picgo_api_key, "PICGO_API_KEY");
+    set_opt!(incoming.storage_backend, "STORAGE_BACKEND");
+    set_opt!(incoming.s3_endpoint, "S3_ENDPOINT");
+    set_opt!(incoming.s3_region, "S3_REGION");
+    set_opt!(incoming.s3_bucket, "S3_BUCKET");
+    set_opt!(incoming.s3_access_key, "S3_ACCESS_KEY");
+    set_opt!(incoming.s3_secret_key, "S3_SECRET_KEY");
+    set_opt!(incoming.s3_public_base_url, "S3_PUBLIC_BASE_URL");
+    set_opt!(incoming.webdav_enabled, "WEBDAV_ENABLED");
+    set_opt!(incoming.webdav_readonly, "WEBDAV_READONLY");
+
+    Ok(result)
+}
+
+fn is_https(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v == "https")
+}
+
+async fn get_app_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let settings = config::get_app_settings(&state.settings, &state.db_pool);
+    let bot = state.bot_state.lock().await;
+
+    Json(serde_json::json!({
+        "status": "ok",
+        "cfg": {
+            "BOT_TOKEN_SET": settings.get("BOT_TOKEN").and_then(|v| v.as_deref()).is_some_and(|v| !v.is_empty()),
+            "CHANNEL_NAME": settings.get("CHANNEL_NAME").and_then(|v| v.as_deref()).unwrap_or(""),
+            "PASS_WORD_SET": settings.get("PASS_WORD").and_then(|v| v.as_deref()).is_some_and(|v| !v.is_empty()),
+            "BASE_URL": settings.get("BASE_URL").and_then(|v| v.as_deref()).unwrap_or(""),
+            "PICGO_API_KEY_SET": settings.get("PICGO_API_KEY").and_then(|v| v.as_deref()).is_some_and(|v| !v.is_empty()),
+            "STORAGE_BACKEND": settings.get("STORAGE_BACKEND").and_then(|v| v.as_deref()).unwrap_or("telegram"),
+            "S3_ENDPOINT": settings.get("S3_ENDPOINT").and_then(|v| v.as_deref()).unwrap_or(""),
+            "S3_REGION": settings.get("S3_REGION").and_then(|v| v.as_deref()).unwrap_or("auto"),
+            "S3_BUCKET": settings.get("S3_BUCKET").and_then(|v| v.as_deref()).unwrap_or(""),
+            "S3_ACCESS_KEY_SET": settings.get("S3_ACCESS_KEY").and_then(|v| v.as_deref()).is_some_and(|v| !v.is_empty()),
+            "S3_SECRET_KEY_SET": settings.get("S3_SECRET_KEY").and_then(|v| v.as_deref()).is_some_and(|v| !v.is_empty()),
+            "S3_PUBLIC_BASE_URL": settings.get("S3_PUBLIC_BASE_URL").and_then(|v| v.as_deref()).unwrap_or(""),
+            "WEBDAV_ENABLED": settings.get("WEBDAV_ENABLED").and_then(|v| v.as_deref()).unwrap_or("0"),
+            "WEBDAV_READONLY": settings.get("WEBDAV_READONLY").and_then(|v| v.as_deref()).unwrap_or("0")
+        },
+        "bot": {
+            "ready": bot.bot_ready,
+            "running": bot.bot_running,
+            "error": bot.bot_error
+        }
+    }))
+}
+
+async fn save_config_only(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<AppConfigRequest>,
+) -> Result<impl IntoResponse, impl IntoResponse> {
+    let existing = database::get_app_settings_from_db(&state.db_pool).unwrap_or_default();
+    let merged = merge_config(&existing, &payload).map_err(|(status, msg, code)| http_error(status, msg, code))?;
+    if let Err((status, msg, code)) = validate_config(&merged) {
+        return Err(http_error(status, msg, code));
+    }
+    database::save_app_settings_to_db(&state.db_pool, &merged).map_err(|e| {
+        tracing::error!("保存配置失败: {}", e);
+        http_error(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "保存配置失败", "save_error")
+    })?;
+    Ok(Json(serde_json::json!({"status": "ok", "message": "已保存（未应用）"})))
+}
+
+async fn save_and_apply(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<AppConfigRequest>,
+) -> Result<impl IntoResponse, impl IntoResponse> {
+    let existing = database::get_app_settings_from_db(&state.db_pool).unwrap_or_default();
+    let merged = merge_config(&existing, &payload).map_err(|(status, msg, code)| http_error(status, msg, code))?;
+    if let Err((status, msg, code)) = validate_config(&merged) {
+        return Err(http_error(status, msg, code));
+    }
+    database::save_app_settings_to_db(&state.db_pool, &merged).map_err(|e| {
+        tracing::error!("保存配置失败: {}", e);
+        http_error(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "保存配置失败", "save_error")
+    })?;
+
+    let _ = state::apply_runtime_settings(state.clone(), true).await;
+    let bot = state.bot_state.lock().await;
+
+    let session_token = merged.get("SESSION_TOKEN").and_then(|v| v.as_deref()).unwrap_or("");
+    let pwd = merged.get("PASS_WORD").and_then(|v| v.as_deref()).unwrap_or("");
+    let cookie = if !pwd.is_empty() && !session_token.is_empty() {
+        auth::build_cookie(session_token, is_https(&headers))
+    } else {
+        auth::build_clear_cookie()
+    };
+
+    Ok((
+        [(axum::http::header::SET_COOKIE, cookie)],
+        Json(serde_json::json!({
+            "status": "ok",
+            "message": "已保存并应用",
+            "bot": {"ready": bot.bot_ready, "running": bot.bot_running}
+        })),
+    ))
+}
+
+async fn reset_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    database::reset_app_settings_in_db(&state.db_pool).ok();
+    let _ = state::apply_runtime_settings(state.clone(), true).await;
+    (
+        [(axum::http::header::SET_COOKIE, crate::auth::build_clear_cookie())],
+        Json(serde_json::json!({"status": "ok", "message": "配置已重置"})),
+    )
+}
+
+async fn set_password(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<PasswordRequest>,
+) -> Result<Json<serde_json::Value>, crate::error::AppError> {
+    let password = payload.password.trim().to_string();
+    let hashed = auth::hash_password(&password).map_err(|e| {
+        tracing::error!("密码哈希失败: {}", e);
+        crate::error::AppError::new(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "密码哈希失败", "hash_error")
+    })?;
+
+    let mut current = database::get_app_settings_from_db(&state.db_pool).unwrap_or_default();
+    current.insert("PASS_WORD".into(), Some(hashed));
+    current.insert("SESSION_TOKEN".into(), Some(auth::generate_session_token()));
+
+    database::save_app_settings_to_db(&state.db_pool, &current).map_err(|_| {
+        crate::error::AppError::new(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "无法写入密码。", "write_password_failed")
+    })?;
+
+    let _ = state::apply_runtime_settings(state.clone(), false).await;
+    Ok(Json(serde_json::json!({"status": "ok", "message": "密码已成功设置。"})))
+}
+
+async fn verify_bot(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<VerifyRequest>,
+) -> impl IntoResponse {
+    let app_settings = config::get_app_settings(&state.settings, &state.db_pool);
+    let token = payload.bot_token.or_else(|| app_settings.get("BOT_TOKEN").and_then(|v| v.clone())).unwrap_or_default();
+
+    if token.is_empty() {
+        return Json(serde_json::json!({"status": "ok", "ok": false, "available": false, "message": "未提供 BOT_TOKEN"}));
+    }
+
+    let url = format!("https://api.telegram.org/bot{}/getMe", token);
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build().unwrap();
+
+    match client.get(&url).send().await {
+        Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(data) => {
+                if data["ok"].as_bool() == Some(true) {
+                    let username = data["result"]["username"].as_str().unwrap_or("unknown");
+                    Json(serde_json::json!({"status": "ok", "ok": true, "available": true, "result": {"username": username}}))
+                } else {
+                    Json(serde_json::json!({"status": "ok", "ok": false, "available": false, "message": data["description"].as_str().unwrap_or("Unknown error")}))
+                }
+            }
+            Err(e) => {
+                tracing::warn!("verify_bot parse error: {}", e);
+                Json(serde_json::json!({"status": "ok", "ok": false, "available": false, "message": "解析响应失败"}))
+            }
+        },
+        Err(e) => {
+            tracing::warn!("verify_bot connect error: {}", e);
+            Json(serde_json::json!({"status": "ok", "ok": false, "available": false, "message": "连接失败"}))
+        }
+    }
+}
+
+async fn verify_channel(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<VerifyRequest>,
+) -> impl IntoResponse {
+    let app_settings = config::get_app_settings(&state.settings, &state.db_pool);
+    let token = payload.bot_token.or_else(|| app_settings.get("BOT_TOKEN").and_then(|v| v.clone())).unwrap_or_default();
+    let channel = payload.channel_name.or_else(|| app_settings.get("CHANNEL_NAME").and_then(|v| v.clone())).unwrap_or_default();
+
+    if token.is_empty() || channel.is_empty() {
+        return Json(serde_json::json!({"status": "ok", "available": false, "message": "缺少 BOT_TOKEN 或 CHANNEL_NAME"}));
+    }
+
+    let url = format!("https://api.telegram.org/bot{}/sendMessage", token);
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build().unwrap();
+
+    match client
+        .post(&url)
+        .json(&serde_json::json!({"chat_id": channel, "text": "tgState channel check"}))
+        .send()
+        .await
+    {
+        Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(data) => {
+                if data["ok"].as_bool() == Some(true) {
+                    if let Some(msg_id) = data["result"]["message_id"].as_i64() {
+                        let del_url = format!("https://api.telegram.org/bot{}/deleteMessage", token);
+                        let _ = client
+                            .post(&del_url)
+                            .json(&serde_json::json!({"chat_id": channel, "message_id": msg_id}))
+                            .send()
+                            .await;
+                    }
+                    Json(serde_json::json!({"status": "ok", "available": true}))
+                } else {
+                    Json(serde_json::json!({"status": "ok", "available": false, "message": data["description"].as_str().unwrap_or("Unknown error")}))
+                }
+            }
+            Err(e) => {
+                tracing::warn!("verify_channel parse error: {}", e);
+                Json(serde_json::json!({"status": "ok", "available": false, "message": "解析响应失败"}))
+            }
+        },
+        Err(e) => {
+            tracing::warn!("verify_channel connect error: {}", e);
+            Json(serde_json::json!({"status": "ok", "available": false, "message": "连接失败"}))
+        }
+    }
+}
+
+pub fn router() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/app-config", get(get_app_config))
+        .route("/api/app-config/save", post(save_config_only))
+        .route("/api/app-config/apply", post(save_and_apply))
+        .route("/api/reset-config", post(reset_config))
+        .route("/api/set-password", post(set_password))
+        .route("/api/verify/bot", post(verify_bot))
+        .route("/api/verify/channel", post(verify_channel))
+}
