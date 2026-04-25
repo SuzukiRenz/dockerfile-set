@@ -12,7 +12,6 @@ use crate::error::AppErrorKind;
 pub type DbPool = Pool<SqliteConnectionManager>;
 
 pub fn db_path(data_dir: &str) -> String {
-    std::fs::create_dir_all(data_dir).ok();
     Path::new(data_dir)
         .join("file_metadata.db")
         .to_string_lossy()
@@ -20,16 +19,32 @@ pub fn db_path(data_dir: &str) -> String {
 }
 
 pub fn init_db(data_dir: &str) -> DbPool {
+    if let Err(err) = std::fs::create_dir_all(data_dir) {
+        panic!("Failed to create data directory '{}': {}", data_dir, err);
+    }
+
     let path = db_path(data_dir);
+    if let Some(parent) = Path::new(&path).parent() {
+        if let Err(err) = std::fs::create_dir_all(parent) {
+            panic!(
+                "Failed to create database parent directory '{}': {}",
+                parent.display(),
+                err
+            );
+        }
+    }
+
     let manager = SqliteConnectionManager::file(&path);
     let pool = Pool::builder()
         .max_size(10)
         .min_idle(Some(2))
         .connection_customizer(Box::new(SqliteInitializer))
         .build(manager)
-        .expect("Failed to create database pool");
+        .unwrap_or_else(|err| panic!("Failed to create database pool at '{}': {}", path, err));
 
-    let conn = pool.get().expect("Failed to get connection for init");
+    let conn = pool
+        .get()
+        .unwrap_or_else(|err| panic!("Failed to get connection for init at '{}': {}", path, err));
 
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS files (
