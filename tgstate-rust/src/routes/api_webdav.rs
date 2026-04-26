@@ -6,6 +6,7 @@ use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::Router;
+use base64::{engine::general_purpose, Engine as _};
 use serde::Serialize;
 
 use crate::config;
@@ -64,6 +65,53 @@ fn webdav_href(name: &str) -> String {
     let encoded =
         percent_encoding::utf8_percent_encode(name, percent_encoding::NON_ALPHANUMERIC).to_string();
     format!("/webdav/{}", encoded)
+}
+
+fn unauthorized_response() -> Response {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::WWW_AUTHENTICATE,
+        HeaderValue::from_static("Basic realm=\"WebDAV\"")
+    );
+    (StatusCode::UNAUTHORIZED, headers, "Unauthorized").into_response()
+}
+
+fn check_webdav_auth(state: &AppState, headers: &HeaderMap) -> bool {
+    let app_settings = config::get_app_settings(&state.settings, &state.db_pool);
+    let username = app_settings
+        .get("WEBDAV_USERNAME")
+        .and_then(|v| v.as_deref())
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or("admin")
+        .trim();
+    let password = match config::get_active_password(&state.settings, &state.db_pool) {
+        Some(v) if !v.trim().is_empty() => v,
+        _ => return false,
+    };
+
+    let auth_value = match headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(v) if v.starts_with("Basic ") => &v[6..],
+        _ => return false,
+    };
+
+    let decoded = match general_purpose::STANDARD.decode(auth_value) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let decoded = match String::from_utf8(decoded) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let (provided_username, provided_password) = match decoded.split_once(':') {
+        Some(v) => v,
+        None => return false,
+    };
+
+    crate::auth::secure_compare(provided_username, username)
+        && crate::auth::verify_password_auto(provided_password, password.trim())
 }
 
 fn lookup_file(state: &AppState, identifier: &str) -> Option<database::FileMetadata> {
@@ -201,10 +249,26 @@ async fn root_handler(
             .into_response();
     }
 
+    if !check_webdav_auth(&state, &headers) {
+        return unauthorized_response();
+    }
+
     let readonly = is_readonly(&state);
 
     match method.as_str() {
-        "OPTIONS" => options_response("OPTIONS, PROPFIND"),
+        "OPTIONS" => {
+            if readonly {
+                options_response("OPTIONS, GET, HEAD, PROPFIND")
+            } else {
+                options_response("OPTIONS, GET, HEAD, PROPFIND, PUT")
+            }
+        }
+        "GET" | "HEAD" => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "WebDAV endpoint",
+        )
+            .into_response(),
         "PROPFIND" => {
             let depth = headers
                 .get("depth")
@@ -264,11 +328,16 @@ async fn entry_handler(
     State(state): State<Arc<AppState>>,
     Path(identifier): Path<String>,
     method: Method,
+    headers: HeaderMap,
     body: Body,
 ) -> Response {
     if !is_enabled(&state) {
         return http_error(StatusCode::NOT_FOUND, "webdav disabled", "webdav_disabled")
             .into_response();
+    }
+
+    if !check_webdav_auth(&state, &headers) {
+        return unauthorized_response();
     }
 
     let readonly = is_readonly(&state);
@@ -338,4 +407,5 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/webdav", any(root_handler))
         .route("/webdav/", any(root_handler))
         .route("/webdav/:identifier", any(entry_handler))
+        .route("/webdav/*identifier", any(entry_handler))
 }

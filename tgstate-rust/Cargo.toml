@@ -55,6 +55,7 @@ futures = "0.3"
 async-stream = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 bytes = "1"
+base64 = "0.22"
 
 # S3 compatible storage
 s3 = { package = "rust-s3", version = "0.34" }

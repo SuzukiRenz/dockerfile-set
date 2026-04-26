@@ -48,6 +48,8 @@ pub struct AppConfigRequest {
     webdav_enabled: Option<String>,
     #[serde(rename = "WEBDAV_READONLY")]
     webdav_readonly: Option<String>,
+    #[serde(rename = "WEBDAV_USERNAME")]
+    webdav_username: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -97,6 +99,11 @@ fn validate_config(
             if !v.is_empty() && !matches!(v, "0" | "1" | "true" | "false") {
                 return Err((axum::http::StatusCode::BAD_REQUEST, "WebDAV 开关仅支持 0/1/true/false", "invalid_webdav_flag"));
             }
+        }
+    }
+    if let Some(Some(username)) = cfg.get("WEBDAV_USERNAME") {
+        if username.trim().is_empty() {
+            return Err((axum::http::StatusCode::BAD_REQUEST, "WEBDAV_USERNAME 不能为空", "invalid_webdav_username"));
         }
     }
     Ok(())
@@ -150,6 +157,7 @@ fn merge_config(
     set_opt!(incoming.s3_public_base_url, "S3_PUBLIC_BASE_URL");
     set_opt!(incoming.webdav_enabled, "WEBDAV_ENABLED");
     set_opt!(incoming.webdav_readonly, "WEBDAV_READONLY");
+    set_opt!(incoming.webdav_username, "WEBDAV_USERNAME");
 
     Ok(result)
 }
@@ -181,7 +189,8 @@ async fn get_app_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
             "S3_SECRET_KEY_SET": settings.get("S3_SECRET_KEY").and_then(|v| v.as_deref()).is_some_and(|v| !v.is_empty()),
             "S3_PUBLIC_BASE_URL": settings.get("S3_PUBLIC_BASE_URL").and_then(|v| v.as_deref()).unwrap_or(""),
             "WEBDAV_ENABLED": settings.get("WEBDAV_ENABLED").and_then(|v| v.as_deref()).unwrap_or("0"),
-            "WEBDAV_READONLY": settings.get("WEBDAV_READONLY").and_then(|v| v.as_deref()).unwrap_or("0")
+            "WEBDAV_READONLY": settings.get("WEBDAV_READONLY").and_then(|v| v.as_deref()).unwrap_or("0"),
+            "WEBDAV_USERNAME": settings.get("WEBDAV_USERNAME").and_then(|v| v.as_deref()).unwrap_or("admin")
         },
         "bot": {
             "ready": bot.bot_ready,

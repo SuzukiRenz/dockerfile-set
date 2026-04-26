@@ -83,7 +83,8 @@ pub fn init_db(data_dir: &str) -> DbPool {
             channel_name TEXT,
             pass_word TEXT,
             picgo_api_key TEXT,
-            base_url TEXT
+            base_url TEXT,
+            webdav_username TEXT
         );",
     )
     .expect("Failed to create app_settings table");
@@ -150,6 +151,12 @@ pub fn init_db(data_dir: &str) -> DbPool {
         "app_settings",
         "webdav_readonly",
         "ALTER TABLE app_settings ADD COLUMN webdav_readonly TEXT",
+    );
+    ensure_column(
+        &conn,
+        "app_settings",
+        "webdav_username",
+        "ALTER TABLE app_settings ADD COLUMN webdav_username TEXT",
     );
 
     conn.execute_batch(
@@ -559,7 +566,7 @@ pub fn list_album_files(pool: &DbPool, album_id: &str) -> Result<Vec<FileMetadat
 pub fn get_app_settings_from_db(pool: &DbPool) -> Result<HashMap<String, Option<String>>, AppErrorKind> {
     let conn = pool.get()?;
     let result = conn.query_row(
-        "SELECT bot_token, channel_name, pass_word, picgo_api_key, base_url, session_token, storage_backend, s3_endpoint, s3_region, s3_bucket, s3_access_key, s3_secret_key, s3_public_base_url, webdav_enabled, webdav_readonly FROM app_settings WHERE id = 1",
+        "SELECT bot_token, channel_name, pass_word, picgo_api_key, base_url, session_token, storage_backend, s3_endpoint, s3_region, s3_bucket, s3_access_key, s3_secret_key, s3_public_base_url, webdav_enabled, webdav_readonly, webdav_username FROM app_settings WHERE id = 1",
         [],
         |row| {
             let mut map = HashMap::new();
@@ -578,6 +585,7 @@ pub fn get_app_settings_from_db(pool: &DbPool) -> Result<HashMap<String, Option<
             map.insert("S3_PUBLIC_BASE_URL".to_string(), row.get::<_, Option<String>>(12)?);
             map.insert("WEBDAV_ENABLED".to_string(), row.get::<_, Option<String>>(13)?);
             map.insert("WEBDAV_READONLY".to_string(), row.get::<_, Option<String>>(14)?);
+            map.insert("WEBDAV_USERNAME".to_string(), row.get::<_, Option<String>>(15)?);
             Ok(map)
         },
     );
@@ -599,7 +607,7 @@ pub fn save_app_settings_to_db(
 ) -> Result<(), AppErrorKind> {
     let conn = pool.get()?;
     conn.execute(
-        "UPDATE app_settings SET bot_token = ?1, channel_name = ?2, pass_word = ?3, picgo_api_key = ?4, base_url = ?5, session_token = ?6, storage_backend = ?7, s3_endpoint = ?8, s3_region = ?9, s3_bucket = ?10, s3_access_key = ?11, s3_secret_key = ?12, s3_public_base_url = ?13, webdav_enabled = ?14, webdav_readonly = ?15 WHERE id = 1",
+        "UPDATE app_settings SET bot_token = ?1, channel_name = ?2, pass_word = ?3, picgo_api_key = ?4, base_url = ?5, session_token = ?6, storage_backend = ?7, s3_endpoint = ?8, s3_region = ?9, s3_bucket = ?10, s3_access_key = ?11, s3_secret_key = ?12, s3_public_base_url = ?13, webdav_enabled = ?14, webdav_readonly = ?15, webdav_username = ?16 WHERE id = 1",
         params![
             norm(payload.get("BOT_TOKEN").and_then(|v| v.as_deref())),
             norm(payload.get("CHANNEL_NAME").and_then(|v| v.as_deref())),
@@ -616,6 +624,7 @@ pub fn save_app_settings_to_db(
             norm(payload.get("S3_PUBLIC_BASE_URL").and_then(|v| v.as_deref())),
             norm(payload.get("WEBDAV_ENABLED").and_then(|v| v.as_deref())),
             norm(payload.get("WEBDAV_READONLY").and_then(|v| v.as_deref())),
+            norm(payload.get("WEBDAV_USERNAME").and_then(|v| v.as_deref())),
         ],
     )?;
     Ok(())
@@ -638,5 +647,6 @@ pub fn reset_app_settings_in_db(pool: &DbPool) -> Result<(), AppErrorKind> {
     payload.insert("S3_PUBLIC_BASE_URL".to_string(), None);
     payload.insert("WEBDAV_ENABLED".to_string(), Some("0".to_string()));
     payload.insert("WEBDAV_READONLY".to_string(), Some("0".to_string()));
+    payload.insert("WEBDAV_USERNAME".to_string(), Some("admin".to_string()));
     save_app_settings_to_db(pool, &payload)
 }

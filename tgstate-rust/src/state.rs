@@ -82,8 +82,9 @@ pub async fn start_bot(state: Arc<AppState>) -> Result<(), String> {
     let token_clone = token.clone();
     let channel_clone = channel.clone();
     let http_client = state.http_client.clone();
+    let state_for_task = state.clone();
     tokio::spawn(async move {
-        bot_polling::run_bot_polling(
+        let result = bot_polling::run_bot_polling(
             token_clone,
             channel_clone,
             db_pool,
@@ -93,6 +94,14 @@ pub async fn start_bot(state: Arc<AppState>) -> Result<(), String> {
             shutdown_rx,
         )
         .await;
+
+        let mut bot = state_for_task.bot_state.lock().await;
+        bot.bot_running = false;
+        bot.shutdown_tx = None;
+        if let Err(e) = result {
+            bot.bot_error = Some(e.clone());
+            tracing::error!("机器人轮询已停止: {}", e);
+        }
     });
 
     bot.shutdown_tx = Some(shutdown_tx);

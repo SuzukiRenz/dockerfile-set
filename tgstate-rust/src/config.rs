@@ -64,6 +64,7 @@ pub fn get_app_settings(settings: &Settings, pool: &DbPool) -> AppSettingsMap {
     result.insert("S3_PUBLIC_BASE_URL".into(), None);
     result.insert("WEBDAV_ENABLED".into(), Some("0".into()));
     result.insert("WEBDAV_READONLY".into(), Some("0".into()));
+    result.insert("WEBDAV_USERNAME".into(), Some("admin".into()));
 
     if let Ok(db_settings) = database::get_app_settings_from_db(pool) {
         for (key, val) in db_settings {

@@ -121,6 +121,7 @@ pub async fn auth_middleware(
     let public_content_prefixes = [
         "/d/",
         "/share/",
+        "/webdav",
     ];
     if public_content_prefixes.iter().any(|p| path.starts_with(p)) {
         return next.run(req).await;
