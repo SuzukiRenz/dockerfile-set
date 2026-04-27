@@ -406,6 +406,5 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/webdav", any(root_handler))
         .route("/webdav/", any(root_handler))
-        .route("/webdav/:identifier", any(entry_handler))
         .route("/webdav/*identifier", any(entry_handler))
 }
