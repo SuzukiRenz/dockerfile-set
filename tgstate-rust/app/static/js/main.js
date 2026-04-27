@@ -9,6 +9,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const previewModalImg = document.getElementById('image-preview-modal-img');
     const previewModalCaption = document.getElementById('image-preview-caption');
     const previewModalClose = document.getElementById('image-preview-close');
+    const folderTree = document.getElementById('folder-tree');
+    const currentFolderGrid = document.getElementById('current-folder-grid');
+    const folderBreadcrumb = document.getElementById('folder-breadcrumb');
+    const folderNavRootBtn = document.getElementById('folder-nav-root-btn');
+    let currentFolderPath = '';
 
     function getActiveCopyFormat() {
         const activeFormatBtn = document.querySelector('.format-option.active');
@@ -85,6 +90,162 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    function normalizeFolderPathClient(value) {
+        return String(value || '')
+            .replace(/\\/g, '/')
+            .split('/')
+            .map(part => part.trim())
+            .filter(part => part && part !== '.' && part !== '..')
+            .join('/');
+    }
+
+    function getParentFolder(path) {
+        const normalized = normalizeFolderPathClient(path);
+        if (!normalized) return '';
+        const parts = normalized.split('/');
+        parts.pop();
+        return parts.join('/');
+    }
+
+    function getFolderEntries() {
+        const folders = new Map();
+        getAllItems().forEach(item => {
+            const folderPath = normalizeFolderPathClient(item.dataset.folderPath || '');
+            let acc = '';
+            folderPath.split('/').filter(Boolean).forEach(part => {
+                acc = acc ? `${acc}/${part}` : part;
+                if (!folders.has(acc)) {
+                    folders.set(acc, {
+                        path: acc,
+                        name: part,
+                        parent: getParentFolder(acc)
+                    });
+                }
+            });
+        });
+        return Array.from(folders.values()).sort((a, b) => a.path.localeCompare(b.path, 'zh-CN'));
+    }
+
+    function getVisibleItemsForCurrentFolder() {
+        return getAllItems().filter(item => normalizeFolderPathClient(item.dataset.folderPath || '') === currentFolderPath);
+    }
+
+    function navigateToFolder(path) {
+        currentFolderPath = normalizeFolderPathClient(path);
+        renderFolderView();
+    }
+
+    function renderFolderBreadcrumb() {
+        if (!folderBreadcrumb) return;
+        const segments = currentFolderPath ? currentFolderPath.split('/') : [];
+        const crumbs = ['<button type="button" class="btn btn-ghost btn-sm folder-crumb" data-folder-path="" style="height: 28px; font-size: 12px;">根目录</button>'];
+        let acc = '';
+        segments.forEach(segment => {
+            acc = acc ? `${acc}/${segment}` : segment;
+            crumbs.push(`<span style="color: var(--text-tertiary);">/</span>`);
+            crumbs.push(`<button type="button" class="btn btn-ghost btn-sm folder-crumb" data-folder-path="${acc}" style="height: 28px; font-size: 12px;">${segment}</button>`);
+        });
+        folderBreadcrumb.innerHTML = crumbs.join('');
+    }
+
+    function renderFolderTree() {
+        if (!folderTree) return;
+        const folders = getFolderEntries();
+        const html = [`
+            <button type="button" class="btn btn-ghost btn-sm folder-nav-item${currentFolderPath === '' ? ' active' : ''}" data-folder-path="" style="justify-content: flex-start; height: 34px; font-size: 13px;">
+                全部文件
+            </button>
+        `];
+        folders.forEach(folder => {
+            const depth = folder.path.split('/').length - 1;
+            const isActive = currentFolderPath === folder.path;
+            html.push(`
+                <button type="button" class="btn btn-ghost btn-sm folder-nav-item${isActive ? ' active' : ''}" data-folder-path="${folder.path}" style="justify-content: flex-start; height: 34px; font-size: 13px; padding-left: ${12 + depth * 16}px;">
+                    📁 ${folder.name}
+                </button>
+            `);
+        });
+        folderTree.innerHTML = html.join('');
+    }
+
+    function renderCurrentFolderGrid() {
+        if (!currentFolderGrid) return;
+        const folders = getFolderEntries().filter(folder => folder.parent === currentFolderPath);
+        const files = getVisibleItemsForCurrentFolder();
+        const cards = [];
+
+        if (currentFolderPath) {
+            cards.push(`
+                <button type="button" class="btn btn-ghost folder-up-card" data-folder-path="${getParentFolder(currentFolderPath)}" style="height: auto; min-height: 92px; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 8px; padding: 14px; border: 1px dashed var(--border-color);">
+                    <span style="font-size: 24px;">↩</span>
+                    <span style="font-size: 13px; font-weight: 600;">返回上一级</span>
+                </button>
+            `);
+        }
+
+        folders.forEach(folder => {
+            cards.push(`
+                <button type="button" class="btn btn-ghost folder-card" data-folder-path="${folder.path}" style="height: auto; min-height: 92px; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 8px; padding: 14px; border: 1px solid var(--border-color);">
+                    <span style="font-size: 24px;">📁</span>
+                    <span style="font-size: 13px; font-weight: 600; text-align: left; word-break: break-all;">${folder.name}</span>
+                </button>
+            `);
+        });
+
+        files.forEach(item => {
+            const fileId = item.dataset.fileId || '';
+            const filename = item.dataset.filename || 'file';
+            cards.push(`
+                <button type="button" class="btn btn-ghost folder-file-card" data-file-id="${fileId}" style="height: auto; min-height: 92px; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 8px; padding: 14px; border: 1px solid var(--border-color);">
+                    <span style="font-size: 24px;">📄</span>
+                    <span style="font-size: 13px; font-weight: 600; text-align: left; word-break: break-all;">${filename}</span>
+                </button>
+            `);
+        });
+
+        if (cards.length === 0) {
+            cards.push('<div class="text-sm text-muted" style="padding: 8px 4px;">当前目录暂无内容</div>');
+        }
+
+        currentFolderGrid.innerHTML = cards.join('');
+    }
+
+    function renderFolderTableVisibility() {
+        const term = (searchInput?.value || '').toLowerCase();
+        const items = getAllItems();
+        let visibleCount = 0;
+        items.forEach(item => {
+            const sameFolder = normalizeFolderPathClient(item.dataset.folderPath || '') === currentFolderPath;
+            const matchesTerm = !term || (item.dataset.filename || '').toLowerCase().includes(term);
+            const isVisible = sameFolder && matchesTerm;
+            item.style.display = isVisible ? '' : 'none';
+            if (isVisible) visibleCount += 1;
+        });
+
+        const container = document.getElementById('file-list-disk');
+        if (!container) return;
+        const existingEmpty = container.querySelector('.folder-empty-row');
+        if (existingEmpty) existingEmpty.remove();
+
+        if (visibleCount === 0) {
+            container.insertAdjacentHTML('beforeend', `
+                <tr class="folder-empty-row">
+                    <td colspan="5" style="padding: 36px; text-align: center;">
+                        <div class="text-muted">当前目录暂无文件</div>
+                    </td>
+                </tr>
+            `);
+        }
+    }
+
+    function renderFolderView() {
+        renderFolderTree();
+        renderFolderBreadcrumb();
+        renderCurrentFolderGrid();
+        renderFolderTableVisibility();
+        updateBatchControls();
+    }
+
     function openPreview(item) {
         if (!previewModal || !previewModalImg || !previewModalCaption) return;
         const url = buildFileUrl(item);
@@ -123,6 +284,34 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    document.addEventListener('click', (e) => {
+        const folderBtn = e.target.closest('.folder-nav-item, .folder-card, .folder-up-card, .folder-crumb');
+        if (folderBtn) {
+            e.preventDefault();
+            navigateToFolder(folderBtn.dataset.folderPath || '');
+            return;
+        }
+
+        const fileCard = e.target.closest('.folder-file-card');
+        if (fileCard) {
+            e.preventDefault();
+            const fileId = fileCard.dataset.fileId || '';
+            const row = document.getElementById(`file-item-${fileId.replace(/:/g, '-')}`);
+            if (row) {
+                row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                row.style.background = 'var(--primary-light)';
+                setTimeout(() => {
+                    row.style.background = '';
+                }, 1200);
+            }
+            return;
+        }
+    });
+
+    if (folderNavRootBtn) {
+        folderNavRootBtn.addEventListener('click', () => navigateToFolder(''));
+    }
+
     // --- Copy Link Delegation ---
     document.addEventListener('click', (e) => {
         const previewBtn = e.target.closest('.preview-image-btn');
@@ -148,18 +337,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- Search Functionality ---
     if (searchInput) {
-        searchInput.addEventListener('input', (e) => {
-            const term = e.target.value.toLowerCase();
-            // Select both file list items and image grid cards
-            const items = document.querySelectorAll('.file-item, .image-card');
-            items.forEach(item => {
-                const name = (item.dataset.filename || '').toLowerCase();
-                if (name.includes(term)) {
-                    item.style.display = ''; // Reset to default (grid or flex)
-                } else {
-                    item.style.display = 'none';
-                }
-            });
+        searchInput.addEventListener('input', () => {
+            renderFolderView();
         });
     }
 
@@ -327,12 +506,18 @@ document.addEventListener('DOMContentLoaded', () => {
     const formatOptions = document.querySelectorAll('.format-option');
 
     function updateBatchControls() {
-        const checkboxes = document.querySelectorAll('.file-checkbox');
-        const checked = document.querySelectorAll('.file-checkbox:checked');
+        const visibleCheckboxes = Array.from(document.querySelectorAll('.file-checkbox')).filter(cb => {
+            const item = cb.closest('.file-item, .image-card');
+            return item && item.style.display !== 'none';
+        });
+        const checked = Array.from(document.querySelectorAll('.file-checkbox:checked')).filter(cb => {
+            const item = cb.closest('.file-item, .image-card');
+            return item && item.style.display !== 'none';
+        });
         const count = checked.length;
 
         if (selectionCounter) selectionCounter.textContent = count;
-        
+
         if (batchActionsBar) {
             if (count > 0) {
                 batchActionsBar.classList.remove('hidden');
@@ -341,13 +526,18 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
-        if (selectAllCheckbox) selectAllCheckbox.checked = (count > 0 && count === checkboxes.length);
+        if (selectAllCheckbox) {
+            selectAllCheckbox.checked = (count > 0 && visibleCheckboxes.length > 0 && count === visibleCheckboxes.length);
+        }
     }
 
     if (selectAllCheckbox) {
         selectAllCheckbox.addEventListener('change', (e) => {
             document.querySelectorAll('.file-checkbox').forEach(cb => {
-                cb.checked = e.target.checked;
+                const item = cb.closest('.file-item, .image-card');
+                if (item && item.style.display !== 'none') {
+                    cb.checked = e.target.checked;
+                }
             });
             updateBatchControls();
         });
@@ -417,18 +607,30 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    function getAllItems() {
+        return Array.from(document.querySelectorAll('.file-item, .image-card'));
+    }
+
     function getCheckedItems() {
         return Array.from(document.querySelectorAll('.file-checkbox:checked'))
             .map(cb => cb.closest('.file-item, .image-card'))
             .filter(Boolean);
     }
 
+    function getScopedItems(selectedFolder, includeSubfolders) {
+        const normalized = normalizeFolderPathClient(selectedFolder);
+        return getAllItems().filter(item => itemMatchesScope(item, normalized, includeSubfolders));
+    }
+
     if (moveFolderBtn) {
         moveFolderBtn.addEventListener('click', async () => {
             const checkedItems = getCheckedItems();
-            if (checkedItems.length === 0) return;
+            if (checkedItems.length === 0) {
+                if (window.Toast) Toast.show('请先勾选要移动的文件', 'error');
+                return;
+            }
 
-            const targetFolder = (folderPathInput?.value || '').trim();
+            const targetFolder = normalizeFolderPathClient((folderPathInput?.value || '').trim());
             const targetIds = checkedItems.map(item => item.dataset.fileId);
 
             const results = await Promise.all(targetIds.map(fileId =>
@@ -454,26 +656,27 @@ document.addEventListener('DOMContentLoaded', () => {
             if (movedCount > 0 && window.Toast) {
                 Toast.show(`已移动 ${movedCount} 个文件`);
             }
+            renderFolderView();
         });
     }
 
     if (saveLinkSettingsBtn) {
         saveLinkSettingsBtn.addEventListener('click', async () => {
             const checkedItems = getCheckedItems();
-            if (checkedItems.length === 0) return;
-
             const visibility = (linkVisibilityInput?.value || 'public').trim() === 'private' ? 'private' : 'public';
             const expiresAt = toRfc3339FromLocalInput(linkExpiresInput?.value || '');
             const includeSubfolders = !!includeSubfoldersToggle?.checked;
-            const selectedFolder = (folderPathInput?.value || '').trim();
+            const selectedFolder = normalizeFolderPathClient((folderPathInput?.value || '').trim());
 
-            let targetItems = checkedItems;
-            if (selectedFolder) {
-                targetItems = checkedItems.filter(item => itemMatchesScope(item, selectedFolder, includeSubfolders));
+            let targetItems = [];
+            if (checkedItems.length > 0) {
+                targetItems = checkedItems;
+            } else if (selectedFolder) {
+                targetItems = getScopedItems(selectedFolder, includeSubfolders);
             }
 
             if (targetItems.length === 0) {
-                if (window.Toast) Toast.show('当前选择范围内没有可更新的文件', 'error');
+                if (window.Toast) Toast.show('请先勾选文件，或输入文件夹路径后批量设置', 'error');
                 return;
             }
 
@@ -629,7 +832,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         container.insertAdjacentHTML('afterbegin', html);
+        renderFolderView();
     }
+
+    renderFolderView();
 
     // --- Global Helpers ---
     window.deleteFile = async (fileId) => {

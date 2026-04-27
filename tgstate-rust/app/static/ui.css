@@ -312,6 +312,18 @@ input, select, textarea { font-family: inherit; }
     box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15), var(--shadow-glow);
 }
 .input-field::placeholder { color: var(--text-tertiary); }
+.datetime-field {
+    position: relative;
+    padding-right: 38px !important;
+}
+.datetime-field::-webkit-calendar-picker-indicator {
+    opacity: 1;
+    cursor: pointer;
+    filter: invert(0.55);
+}
+[data-theme="dark"] .datetime-field::-webkit-calendar-picker-indicator {
+    filter: invert(0.9);
+}
 
 /* --- Empty State --- */
 .empty-state {

@@ -3,6 +3,13 @@
 {% block title %}文件管理 - tgState{% endblock %}
 
 {% block content %}
+<style>
+@media (max-width: 960px) {
+    .file-manager-shell {
+        grid-template-columns: 1fr !important;
+    }
+}
+</style>
 <div style="display: flex; flex-direction: column; gap: 20px;">
     <!-- Header -->
     <div class="flex-between">
@@ -53,70 +60,91 @@
                 <option value="public">公开</option>
                 <option value="private">私密</option>
             </select>
-            <input type="datetime-local" id="link-expires-input" class="input-field" style="height: 32px; min-width: 210px; padding: 0 10px;">
+            <input type="datetime-local" id="link-expires-input" class="input-field datetime-field" style="height: 32px; min-width: 210px; padding: 0 10px;">
             <button id="save-link-settings-btn" class="btn btn-secondary btn-sm" style="height: 32px; font-size: 13px;">短链设置</button>
             <button id="copy-links-btn" class="btn btn-secondary btn-sm" style="height: 32px; font-size: 13px;">复制链接</button>
             <button id="batch-delete-btn" class="btn btn-secondary btn-sm" style="height: 32px; font-size: 13px; color: var(--danger-color);">删除</button>
         </div>
     </div>
 
-    <!-- File List -->
-    <div class="card" style="padding: 0; overflow: hidden;">
-        <div class="table-responsive">
-            <table style="width: 100%; border-collapse: collapse; min-width: 600px;">
-                <thead>
-                    <tr style="border-bottom: 1px solid var(--border-color); background: var(--bg-surface-hover);">
-                        <th style="padding: 12px 16px; width: 40px;"><input type="checkbox" id="select-all-checkbox"></th>
-                        <th style="padding: 12px 16px; text-align: left; font-weight: 600; font-size: 13px; color: var(--text-secondary);">文件名</th>
-                        <th style="padding: 12px 16px; text-align: left; font-weight: 600; font-size: 13px; color: var(--text-secondary); width: 100px;">大小</th>
-                        <th style="padding: 12px 16px; text-align: left; font-weight: 600; font-size: 13px; color: var(--text-secondary); width: 120px;">日期</th>
-                        <th style="padding: 12px 16px; text-align: right; font-weight: 600; font-size: 13px; color: var(--text-secondary); width: 140px;">操作</th>
-                    </tr>
-                </thead>
-                <tbody id="file-list-disk">
-                    {% if files %}
-                        {% for file in files %}
-                        <tr class="file-item" style="border-bottom: 1px solid var(--border-color);" id="file-item-{{ file.file_id | replace(from=':', to='-') }}" data-short-id="{{ file.short_id }}" data-file-id="{{ file.file_id }}" data-filename="{{ file.filename }}" data-file-url="/d/{{ file.display_id }}" data-folder-path="{{ file.folder_path }}" data-link-visibility="{{ file.link_visibility }}" data-expires-at="{{ file.expires_at | default(value='') }}">
-                            <td style="padding: 12px 16px;"><input type="checkbox" class="file-checkbox" data-file-id="{{ file.file_id }}"></td>
-                            <td style="padding: 12px 16px;">
-                                <div style="display: flex; align-items: center; gap: 8px;">
-                                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--primary-color);"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>
-                                    <div style="display: flex; flex-direction: column; gap: 2px; min-width: 0;">
-                                        <span class="text-sm font-medium" style="color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ file.filename }}</span>
-                                        <span class="text-sm text-muted folder-path-text">{{ file.folder_path | default(value='') }}</span>
-                                        <span class="text-sm text-muted link-settings-text">{{ file.link_visibility }}{% if file.expires_at %} · {{ file.expires_at }}{% endif %}</span>
+    <!-- File Manager -->
+    <div class="file-manager-shell" style="display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 16px; align-items: start;">
+        <div class="card" style="padding: 16px; display: flex; flex-direction: column; gap: 12px; position: sticky; top: 16px;">
+            <div class="flex-between" style="gap: 8px; align-items: center;">
+                <span style="font-size: 14px; font-weight: 700; color: var(--text-primary);">逻辑文件夹</span>
+                <button type="button" id="folder-nav-root-btn" class="btn btn-ghost btn-sm" style="height: 28px; font-size: 12px;">根目录</button>
+            </div>
+            <div id="folder-tree" style="display: flex; flex-direction: column; gap: 6px;"></div>
+        </div>
+
+        <div class="card" style="padding: 0; overflow: hidden;">
+            <div style="padding: 16px; border-bottom: 1px solid var(--border-color); display: flex; flex-direction: column; gap: 10px; background: var(--bg-surface-hover);">
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
+                    <div style="display: flex; flex-direction: column; gap: 4px; min-width: 0;">
+                        <span style="font-size: 13px; color: var(--text-secondary);">当前位置</span>
+                        <div id="folder-breadcrumb" style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center; color: var(--text-primary); font-size: 14px; font-weight: 600;"></div>
+                    </div>
+                    <div class="text-sm text-muted">文件夹与文件混合视图</div>
+                </div>
+                <div id="current-folder-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px;"></div>
+            </div>
+
+            <div class="table-responsive">
+                <table style="width: 100%; border-collapse: collapse; min-width: 600px;">
+                    <thead>
+                        <tr style="border-bottom: 1px solid var(--border-color); background: var(--bg-surface-hover);">
+                            <th style="padding: 12px 16px; width: 40px;"><input type="checkbox" id="select-all-checkbox"></th>
+                            <th style="padding: 12px 16px; text-align: left; font-weight: 600; font-size: 13px; color: var(--text-secondary);">文件名</th>
+                            <th style="padding: 12px 16px; text-align: left; font-weight: 600; font-size: 13px; color: var(--text-secondary); width: 100px;">大小</th>
+                            <th style="padding: 12px 16px; text-align: left; font-weight: 600; font-size: 13px; color: var(--text-secondary); width: 120px;">日期</th>
+                            <th style="padding: 12px 16px; text-align: right; font-weight: 600; font-size: 13px; color: var(--text-secondary); width: 140px;">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="file-list-disk">
+                        {% if files %}
+                            {% for file in files %}
+                            <tr class="file-item" style="border-bottom: 1px solid var(--border-color);" id="file-item-{{ file.file_id | replace(from=':', to='-') }}" data-short-id="{{ file.short_id }}" data-file-id="{{ file.file_id }}" data-filename="{{ file.filename }}" data-file-url="/d/{{ file.display_id }}" data-folder-path="{{ file.folder_path }}" data-link-visibility="{{ file.link_visibility }}" data-expires-at="{{ file.expires_at | default(value='') }}">
+                                <td style="padding: 12px 16px;"><input type="checkbox" class="file-checkbox" data-file-id="{{ file.file_id }}"></td>
+                                <td style="padding: 12px 16px;">
+                                    <div style="display: flex; align-items: center; gap: 8px;">
+                                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--primary-color);"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>
+                                        <div style="display: flex; flex-direction: column; gap: 2px; min-width: 0;">
+                                            <span class="text-sm font-medium" style="color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ file.filename }}</span>
+                                            <span class="text-sm text-muted folder-path-text">{{ file.folder_path | default(value='') }}</span>
+                                            <span class="text-sm text-muted link-settings-text">{{ file.link_visibility }}{% if file.expires_at %} · {{ file.expires_at }}{% endif %}</span>
+                                        </div>
                                     </div>
-                                </div>
-                            </td>
-                            <td style="padding: 12px 16px;" class="text-sm text-muted">{{ file.filesize_mb }} MB</td>
-                            <td style="padding: 12px 16px;" class="text-sm text-muted">{{ file.upload_date_short }}</td>
-                            <td style="padding: 12px 16px; text-align: right;">
-                                <div style="display: flex; justify-content: flex-end; gap: 8px;">
-                                    <a href="/d/{{ file.display_id }}" class="btn btn-ghost" style="padding: 4px 8px; height: 28px;" title="下载">
-                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-                                    </a>
-                                    <button class="btn btn-ghost copy-link-btn" style="padding: 4px 8px; height: 28px;" title="复制链接">
-                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-                                    </button>
-                                    <button class="btn btn-ghost delete" style="padding: 4px 8px; height: 28px; color: var(--danger-color);" onclick="deleteFile('{{ file.file_id }}')" title="删除">
-                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
-                                    </button>
-                                </div>
-                            </td>
-                        </tr>
-                        {% endfor %}
-                    {% else %}
-                        <tr>
-                            <td colspan="5" style="padding: 48px; text-align: center;">
-                                <div class="text-muted">暂无文件</div>
-                            </td>
-                        </tr>
-                    {% endif %}
-                </tbody>
-            </table>
+                                </td>
+                                <td style="padding: 12px 16px;" class="text-sm text-muted">{{ file.filesize_mb }} MB</td>
+                                <td style="padding: 12px 16px;" class="text-sm text-muted">{{ file.upload_date_short }}</td>
+                                <td style="padding: 12px 16px; text-align: right;">
+                                    <div style="display: flex; justify-content: flex-end; gap: 8px;">
+                                        <a href="/d/{{ file.display_id }}" class="btn btn-ghost" style="padding: 4px 8px; height: 28px;" title="下载">
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                                        </a>
+                                        <button class="btn btn-ghost copy-link-btn" style="padding: 4px 8px; height: 28px;" title="复制链接">
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                                        </button>
+                                        <button class="btn btn-ghost delete" style="padding: 4px 8px; height: 28px; color: var(--danger-color);" onclick="deleteFile('{{ file.file_id }}')" title="删除">
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        {% else %}
+                            <tr>
+                                <td colspan="5" style="padding: 48px; text-align: center;">
+                                    <div class="text-muted">暂无文件</div>
+                                </td>
+                            </tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
         </div>
     </div>
     {% endif %}
 </div>
-<script src="/static/js/main.js?v=4.0"></script>
+<script src="/static/js/main.js?v=4.2"></script>
 {% endblock %}
