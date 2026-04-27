@@ -213,11 +213,13 @@ document.addEventListener('DOMContentLoaded', () => {
     function renderFolderTableVisibility() {
         const term = (searchInput?.value || '').toLowerCase();
         const items = getAllItems();
+        const hasFolderExplorer = !!(folderTree || currentFolderGrid || folderBreadcrumb || folderNavRootBtn);
         let visibleCount = 0;
+
         items.forEach(item => {
-            const sameFolder = normalizeFolderPathClient(item.dataset.folderPath || '') === currentFolderPath;
             const matchesTerm = !term || (item.dataset.filename || '').toLowerCase().includes(term);
-            const isVisible = sameFolder && matchesTerm;
+            const sameFolder = normalizeFolderPathClient(item.dataset.folderPath || '') === currentFolderPath;
+            const isVisible = hasFolderExplorer ? (sameFolder && matchesTerm) : matchesTerm;
             item.style.display = isVisible ? '' : 'none';
             if (isVisible) visibleCount += 1;
         });
@@ -227,7 +229,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const existingEmpty = container.querySelector('.folder-empty-row');
         if (existingEmpty) existingEmpty.remove();
 
-        if (visibleCount === 0) {
+        if (visibleCount === 0 && !document.querySelector('.image-grid')) {
             container.insertAdjacentHTML('beforeend', `
                 <tr class="folder-empty-row">
                     <td colspan="5" style="padding: 36px; text-align: center;">
@@ -239,9 +241,11 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function renderFolderView() {
-        renderFolderTree();
-        renderFolderBreadcrumb();
-        renderCurrentFolderGrid();
+        if (folderTree || currentFolderGrid || folderBreadcrumb) {
+            renderFolderTree();
+            renderFolderBreadcrumb();
+            renderCurrentFolderGrid();
+        }
         renderFolderTableVisibility();
         updateBatchControls();
     }
