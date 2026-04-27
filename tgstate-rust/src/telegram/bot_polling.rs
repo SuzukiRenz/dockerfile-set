@@ -137,7 +137,7 @@ async fn process_update(
     // Handle new file (message or channel_post)
     let message = update.message.as_ref().or(update.channel_post.as_ref());
     if let Some(msg) = message {
-        if msg.document.is_some() || msg.photo.is_some() {
+        if msg.document.is_some() || msg.photo.is_some() || msg.video.is_some() {
             handle_new_file(msg, channel_name, db_pool, event_bus).await;
         }
         // Handle "get" reply
@@ -154,7 +154,7 @@ async fn process_update(
         .as_ref()
         .or(update.edited_channel_post.as_ref());
     if let Some(msg) = edited {
-        if msg.text.is_none() && msg.document.is_none() && msg.photo.is_none() {
+        if msg.text.is_none() && msg.document.is_none() && msg.photo.is_none() && msg.video.is_none() {
             handle_deleted_message(msg, db_pool, event_bus).await;
         }
     }
@@ -186,6 +186,12 @@ async fn handle_new_file(
             doc.file_id.clone(),
             doc.file_name.clone().unwrap_or_else(|| format!("file_{}", message.message_id)),
             doc.file_size.unwrap_or(0),
+        )
+    } else if let Some(video) = &message.video {
+        (
+            video.file_id.clone(),
+            video.file_name.clone().unwrap_or_else(|| format!("video_{}.mp4", message.message_id)),
+            video.file_size.unwrap_or(0),
         )
     } else if let Some(photos) = &message.photo {
         if let Some(photo) = photos.last() {
@@ -231,6 +237,7 @@ async fn handle_new_file(
                 Some(file_size),
                 Some(&upload_date),
                 Some(&short_id),
+                Some(""),
             );
             event_bus.publish(serde_json::to_string(&event).unwrap_or_default());
         }
@@ -255,6 +262,11 @@ async fn handle_get_reply(
             doc.file_id.clone(),
             doc.file_name.clone().unwrap_or_else(|| format!("file_{}", replied.message_id)),
         )
+    } else if let Some(video) = &replied.video {
+        (
+            video.file_id.clone(),
+            video.file_name.clone().unwrap_or_else(|| format!("video_{}.mp4", replied.message_id)),
+        )
     } else if let Some(photos) = &replied.photo {
         if let Some(photo) = photos.last() {
             (
@@ -266,7 +278,7 @@ async fn handle_get_reply(
                 &tg_service.client,
                 &tg_service.bot_token,
                 message.chat.id,
-                "请回复到一个文件/图片消息",
+                "请回复到一个文件/图片/视频消息",
             )
             .await;
             return;
@@ -276,7 +288,7 @@ async fn handle_get_reply(
             &tg_service.client,
             &tg_service.bot_token,
             message.chat.id,
-            "请回复到一个文件/图片消息",
+            "请回复到一个文件/图片/视频消息",
         )
         .await;
         return;
@@ -342,7 +354,7 @@ async fn handle_deleted_message(
 
     match database::delete_file_by_message_id(db_pool, message_id) {
         Ok(Some(file_id)) => {
-            let event = build_file_event("delete", &file_id, None, None, None, None);
+            let event = build_file_event("delete", &file_id, None, None, None, None, None);
             event_bus.publish(serde_json::to_string(&event).unwrap_or_default());
         }
         _ => {}

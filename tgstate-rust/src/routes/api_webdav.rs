@@ -62,8 +62,15 @@ fn is_readonly(state: &AppState) -> bool {
 }
 
 fn webdav_href(name: &str) -> String {
-    let encoded =
-        percent_encoding::utf8_percent_encode(name, percent_encoding::NON_ALPHANUMERIC).to_string();
+    let encoded = name
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| {
+            percent_encoding::utf8_percent_encode(segment, percent_encoding::NON_ALPHANUMERIC)
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("/");
     format!("/webdav/{}", encoded)
 }
 
@@ -119,10 +126,83 @@ fn lookup_file(state: &AppState, identifier: &str) -> Option<database::FileMetad
         return Some(file);
     }
 
+    if let Ok(Some(file)) = database::get_file_by_webdav_path(&state.db_pool, identifier) {
+        return Some(file);
+    }
+
     database::get_all_files(&state.db_pool)
         .ok()?
         .into_iter()
         .find(|f| f.filename == identifier)
+}
+
+fn split_webdav_path(path: &str) -> Vec<&str> {
+    path.split('/').filter(|segment| !segment.is_empty()).collect()
+}
+
+fn file_virtual_path(file: &database::FileMetadata) -> String {
+    if file.folder_path.is_empty() {
+        file.filename.clone()
+    } else {
+        format!("{}/{}", file.folder_path, file.filename)
+    }
+}
+
+fn list_folder_entries(state: &AppState, current_path: &str) -> Vec<WebDavListItem> {
+    let current = database::normalize_folder_path(current_path);
+    let files = database::get_all_files(&state.db_pool).unwrap_or_default();
+    let mut folders = std::collections::BTreeSet::new();
+    let mut items = Vec::new();
+
+    for file in files {
+        let virtual_path = file_virtual_path(&file);
+        let parts = split_webdav_path(&virtual_path);
+        if parts.is_empty() {
+            continue;
+        }
+
+        let current_parts = split_webdav_path(&current);
+        if parts.len() <= current_parts.len() || parts[..current_parts.len()] != current_parts[..] {
+            continue;
+        }
+
+        let remaining = &parts[current_parts.len()..];
+        if remaining.len() == 1 {
+            items.push(WebDavListItem {
+                href: webdav_href(&virtual_path),
+                name: file.filename.clone(),
+                size: file.filesize,
+                modified: if file.upload_date.is_empty() {
+                    chrono::Utc::now().to_rfc2822()
+                } else {
+                    file.upload_date.clone()
+                },
+                is_collection: false,
+            });
+        } else {
+            let folder_rel = remaining[0];
+            let folder_full = if current.is_empty() {
+                folder_rel.to_string()
+            } else {
+                format!("{}/{}", current, folder_rel)
+            };
+            folders.insert(folder_full);
+        }
+    }
+
+    let mut folder_items = folders
+        .into_iter()
+        .map(|folder| WebDavListItem {
+            href: webdav_href(&folder),
+            name: folder.rsplit('/').next().unwrap_or(&folder).to_string(),
+            size: 0,
+            modified: chrono::Utc::now().to_rfc2822(),
+            is_collection: true,
+        })
+        .collect::<Vec<_>>();
+
+    folder_items.extend(items);
+    folder_items
 }
 
 fn build_multistatus(base: &str, items: &[WebDavListItem]) -> String {
@@ -284,18 +364,7 @@ async fn root_handler(
             }];
 
             if depth != "0" {
-                let files = database::get_all_files(&state.db_pool).unwrap_or_default();
-                items.extend(files.into_iter().map(|f| WebDavListItem {
-                    href: webdav_href(&f.filename),
-                    name: f.filename,
-                    size: f.filesize,
-                    modified: if f.upload_date.is_empty() {
-                        chrono::Utc::now().to_rfc2822()
-                    } else {
-                        f.upload_date
-                    },
-                    is_collection: false,
-                }));
+                items.extend(list_folder_entries(&state, ""));
             }
 
             let body = build_multistatus("", &items);
@@ -350,10 +419,11 @@ async fn entry_handler(
                 options_response("OPTIONS, PROPFIND, GET, HEAD, PUT")
             }
         }
-        "PROPFIND" => match lookup_file(&state, &identifier) {
-            Some(f) => {
+        "PROPFIND" => {
+            let normalized = database::normalize_folder_path(&identifier);
+            if let Some(f) = lookup_file(&state, &normalized) {
                 let item = WebDavListItem {
-                    href: webdav_href(&f.filename),
+                    href: webdav_href(&file_virtual_path(&f)),
                     name: f.filename,
                     size: f.filesize,
                     modified: if f.upload_date.is_empty() {
@@ -370,10 +440,37 @@ async fn entry_handler(
                     body,
                 )
                     .into_response()
+            } else {
+                let entries = list_folder_entries(&state, &normalized);
+                if entries.is_empty() {
+                    http_error(StatusCode::NOT_FOUND, "file not found", "not_found").into_response()
+                } else {
+                    let current_name = normalized.rsplit('/').next().unwrap_or(&normalized);
+                    let mut items = vec![WebDavListItem {
+                        href: webdav_href(&normalized),
+                        name: current_name.to_string(),
+                        size: 0,
+                        modified: chrono::Utc::now().to_rfc2822(),
+                        is_collection: true,
+                    }];
+                    let depth = headers
+                        .get("depth")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("1");
+                    if depth != "0" {
+                        items.extend(entries);
+                    }
+                    let body = build_multistatus("", &items);
+                    (
+                        StatusCode::MULTI_STATUS,
+                        [(header::CONTENT_TYPE, "application/xml; charset=utf-8")],
+                        body,
+                    )
+                        .into_response()
+                }
             }
-            None => http_error(StatusCode::NOT_FOUND, "file not found", "not_found").into_response(),
-        },
-        "GET" | "HEAD" => match lookup_file(&state, &identifier) {
+        }
+        "GET" | "HEAD" => match lookup_file(&state, &database::normalize_folder_path(&identifier)) {
             Some(f) => Response::builder()
                 .status(StatusCode::TEMPORARY_REDIRECT)
                 .header(

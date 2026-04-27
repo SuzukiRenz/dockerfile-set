@@ -7,10 +7,14 @@
     <!-- Header -->
     <div class="flex-between">
         <h1 style="font-size: 26px; font-weight: 800;">文件管理</h1>
-        <div style="display: flex; gap: 12px; flex: 1; justify-content: flex-end; min-width: 0;">
+        <div style="display: flex; gap: 12px; flex: 1; justify-content: flex-end; min-width: 0; align-items: center; flex-wrap: wrap;">
             <div class="input-group" style="margin-bottom: 0; max-width: 280px; width: 100%;">
                 <input type="text" id="file-search" class="input-field" placeholder="搜索文件..." style="width: 100%; height: 40px;">
             </div>
+            <label style="display: flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 13px;">
+                <input type="checkbox" id="include-subfolders-toggle" checked>
+                包含子文件夹
+            </label>
         </div>
     </div>
 
@@ -42,7 +46,15 @@
     <!-- Batch Actions -->
     <div class="flex-between hidden" id="batch-actions-bar" style="background: var(--bg-surface-hover); padding: 12px 16px; border-radius: var(--radius-md);">
         <span class="text-sm font-medium"><span id="selection-counter">0</span> 项已选</span>
-        <div style="display: flex; gap: 8px;">
+        <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+            <input type="text" id="folder-path-input" class="input-field" placeholder="例如：项目A/截图" style="height: 32px; min-width: 180px; padding: 0 10px;">
+            <button id="move-folder-btn" class="btn btn-secondary btn-sm" style="height: 32px; font-size: 13px;">移动到文件夹</button>
+            <select id="link-visibility-input" class="input-field" style="height: 32px; min-width: 110px; padding: 0 10px;">
+                <option value="public">公开</option>
+                <option value="private">私密</option>
+            </select>
+            <input type="datetime-local" id="link-expires-input" class="input-field" style="height: 32px; min-width: 210px; padding: 0 10px;">
+            <button id="save-link-settings-btn" class="btn btn-secondary btn-sm" style="height: 32px; font-size: 13px;">短链设置</button>
             <button id="copy-links-btn" class="btn btn-secondary btn-sm" style="height: 32px; font-size: 13px;">复制链接</button>
             <button id="batch-delete-btn" class="btn btn-secondary btn-sm" style="height: 32px; font-size: 13px; color: var(--danger-color);">删除</button>
         </div>
@@ -64,12 +76,16 @@
                 <tbody id="file-list-disk">
                     {% if files %}
                         {% for file in files %}
-                        <tr class="file-item" style="border-bottom: 1px solid var(--border-color);" id="file-item-{{ file.file_id | replace(from=':', to='-') }}" data-short-id="{{ file.short_id }}" data-file-id="{{ file.file_id }}" data-filename="{{ file.filename }}" data-file-url="/d/{{ file.display_id }}">
+                        <tr class="file-item" style="border-bottom: 1px solid var(--border-color);" id="file-item-{{ file.file_id | replace(from=':', to='-') }}" data-short-id="{{ file.short_id }}" data-file-id="{{ file.file_id }}" data-filename="{{ file.filename }}" data-file-url="/d/{{ file.display_id }}" data-folder-path="{{ file.folder_path }}" data-link-visibility="{{ file.link_visibility }}" data-expires-at="{{ file.expires_at | default(value='') }}">
                             <td style="padding: 12px 16px;"><input type="checkbox" class="file-checkbox" data-file-id="{{ file.file_id }}"></td>
                             <td style="padding: 12px 16px;">
                                 <div style="display: flex; align-items: center; gap: 8px;">
                                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--primary-color);"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>
-                                    <span class="text-sm font-medium" style="color: var(--text-primary);">{{ file.filename }}</span>
+                                    <div style="display: flex; flex-direction: column; gap: 2px; min-width: 0;">
+                                        <span class="text-sm font-medium" style="color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ file.filename }}</span>
+                                        <span class="text-sm text-muted folder-path-text">{{ file.folder_path | default(value='') }}</span>
+                                        <span class="text-sm text-muted link-settings-text">{{ file.link_visibility }}{% if file.expires_at %} · {{ file.expires_at }}{% endif %}</span>
+                                    </div>
                                 </div>
                             </td>
                             <td style="padding: 12px 16px;" class="text-sm text-muted">{{ file.filesize_mb }} MB</td>

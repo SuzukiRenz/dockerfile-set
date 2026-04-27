@@ -26,6 +26,17 @@ pub struct BatchDeleteRequest {
     file_ids: Vec<String>,
 }
 
+#[derive(Deserialize)]
+pub struct MoveFileRequest {
+    folder_path: String,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateLinkSettingsRequest {
+    link_visibility: String,
+    expires_at: Option<String>,
+}
+
 fn get_telegram_service(state: &AppState) -> Result<TelegramService, impl IntoResponse> {
     let app_settings = config::get_app_settings(&state.settings, &state.db_pool);
     let token = app_settings
@@ -92,6 +103,49 @@ fn chunk_download_failed_response(chunk_id: &str) -> Response {
         "chunk_download_failed",
     )
     .into_response()
+}
+
+fn is_link_expired(meta: &database::FileMetadata) -> bool {
+    meta.expires_at
+        .as_deref()
+        .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc) <= chrono::Utc::now())
+        .unwrap_or(false)
+}
+
+fn extract_session_cookie(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cookies| {
+            cookies.split(';').find_map(|c| {
+                let c = c.trim();
+                c.strip_prefix(&format!("{}=", crate::auth::COOKIE_NAME))
+                    .map(|v| v.to_string())
+            })
+        })
+}
+
+fn check_link_access(state: &AppState, meta: &database::FileMetadata, headers: &HeaderMap) -> Option<Response> {
+    if is_link_expired(meta) {
+        return Some(http_error(StatusCode::GONE, "短链已过期", "link_expired").into_response());
+    }
+
+    if meta.link_visibility == "private" {
+        let cookie = extract_session_cookie(headers);
+        let active_pwd = config::get_active_password(&state.settings, &state.db_pool);
+        let app_settings = config::get_app_settings(&state.settings, &state.db_pool);
+        let session_token = app_settings.get("SESSION_TOKEN").and_then(|v| v.clone());
+        let authorized = match (cookie.as_deref(), active_pwd.as_deref(), session_token.as_deref()) {
+            (Some(c), Some(p), Some(t)) if !p.is_empty() && !t.is_empty() => crate::auth::secure_compare(c, t),
+            _ => false,
+        };
+        if !authorized {
+            return Some(http_error(StatusCode::UNAUTHORIZED, "短链为私密可见", "private_link").into_response());
+        }
+    }
+
+    None
 }
 
 async fn serve_telegram_file(
@@ -445,6 +499,9 @@ async fn download_file_short(
     let meta = database::get_file_by_id(&state.db_pool, &identifier);
     match meta {
         Ok(Some(f)) => {
+            if let Some(resp) = check_link_access(&state, &f, &headers) {
+                return resp;
+            }
             let force_download = query
                 .download
                 .as_deref()
@@ -464,6 +521,9 @@ async fn download_file_short_head(
     let meta = database::get_file_by_id(&state.db_pool, &identifier);
     match meta {
         Ok(Some(f)) => {
+            if let Some(resp) = check_link_access(&state, &f, &headers) {
+                return resp;
+            }
             let force_download = query
                 .download
                 .as_deref()
@@ -490,8 +550,14 @@ async fn download_file_legacy(
             short_id: None,
             storage_backend: crate::constants::STORAGE_BACKEND_TELEGRAM.to_string(),
             storage_path: None,
+            folder_path: String::new(),
+            link_visibility: "public".to_string(),
+            expires_at: None,
         },
     };
+    if let Some(resp) = check_link_access(&state, &meta, &headers) {
+        return resp;
+    }
     let force_download = query
         .download
         .as_deref()
@@ -515,8 +581,14 @@ async fn download_file_legacy_head(
             short_id: None,
             storage_backend: crate::constants::STORAGE_BACKEND_TELEGRAM.to_string(),
             storage_path: None,
+            folder_path: String::new(),
+            link_visibility: "public".to_string(),
+            expires_at: None,
         },
     };
+    if let Some(resp) = check_link_access(&state, &meta, &headers) {
+        return resp;
+    }
     let force_download = query
         .download
         .as_deref()
@@ -527,6 +599,72 @@ async fn download_file_legacy_head(
 async fn get_files_list(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let files = database::get_all_files(&state.db_pool).unwrap_or_default();
     Json(files)
+}
+
+async fn get_folders_list(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let folders = database::list_folder_paths(&state.db_pool).unwrap_or_default();
+    Json(serde_json::json!({ "folders": folders }))
+}
+
+async fn move_file(
+    State(state): State<Arc<AppState>>,
+    Path(file_id): Path<String>,
+    Json(payload): Json<MoveFileRequest>,
+) -> impl IntoResponse {
+    let normalized = database::normalize_folder_path(&payload.folder_path);
+    match database::update_file_folder(&state.db_pool, &file_id, &normalized) {
+        Ok(true) => {
+            let meta = database::get_file_by_id(&state.db_pool, &file_id).ok().flatten();
+            let event = crate::events::build_file_event(
+                "move",
+                &file_id,
+                meta.as_ref().map(|m| m.filename.as_str()),
+                meta.as_ref().map(|m| m.filesize),
+                meta.as_ref().map(|m| m.upload_date.as_str()),
+                meta.as_ref().and_then(|m| m.short_id.as_deref()),
+                Some(normalized.as_str()),
+            );
+            state
+                .event_bus
+                .publish(serde_json::to_string(&event).unwrap_or_default());
+            Json(serde_json::json!({ "status": "ok", "folder_path": normalized })).into_response()
+        }
+        Ok(false) => http_error(StatusCode::NOT_FOUND, "文件不存在", "not_found").into_response(),
+        Err(e) => crate::error::AppError::from(e).into_response(),
+    }
+}
+
+async fn update_link_settings(
+    State(state): State<Arc<AppState>>,
+    Path(file_id): Path<String>,
+    Json(payload): Json<UpdateLinkSettingsRequest>,
+) -> impl IntoResponse {
+    let visibility = match payload.link_visibility.trim() {
+        "private" => "private",
+        _ => "public",
+    };
+    let expires_at = payload
+        .expires_at
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+
+    if let Some(ref value) = expires_at {
+        if chrono::DateTime::parse_from_rfc3339(value).is_err() {
+            return http_error(StatusCode::BAD_REQUEST, "expires_at 必须是 RFC3339 时间", "invalid_expires_at").into_response();
+        }
+    }
+
+    match database::update_file_link_settings(&state.db_pool, &file_id, visibility, expires_at.as_deref()) {
+        Ok(true) => Json(serde_json::json!({
+            "status": "ok",
+            "link_visibility": visibility,
+            "expires_at": expires_at,
+        })).into_response(),
+        Ok(false) => http_error(StatusCode::NOT_FOUND, "文件不存在", "not_found").into_response(),
+        Err(e) => crate::error::AppError::from(e).into_response(),
+    }
 }
 
 async fn delete_file(
@@ -673,6 +811,9 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/files", get(get_files_list))
         .route("/api/files/:file_id", delete(delete_file))
+        .route("/api/files/:file_id/move", post(move_file))
+        .route("/api/files/:file_id/link-settings", post(update_link_settings))
+        .route("/api/folders", get(get_folders_list))
         .route("/api/batch_delete", post(batch_delete_files))
         .route(
             "/d/:file_id/:filename",

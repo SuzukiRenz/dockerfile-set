@@ -64,6 +64,9 @@ fn enrich_files(files: &[database::FileMetadata]) -> Vec<serde_json::Value> {
                 "upload_date": f.upload_date,
                 "upload_date_short": upload_date_short,
                 "display_id": display_id,
+                "folder_path": f.folder_path,
+                "link_visibility": f.link_visibility,
+                "expires_at": f.expires_at,
             })
         })
         .collect()

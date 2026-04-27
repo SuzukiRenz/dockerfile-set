@@ -55,7 +55,10 @@ pub fn init_db(data_dir: &str) -> DbPool {
             upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             short_id TEXT UNIQUE,
             storage_backend TEXT NOT NULL DEFAULT 'telegram',
-            storage_path TEXT
+            storage_path TEXT,
+            folder_path TEXT NOT NULL DEFAULT '',
+            link_visibility TEXT NOT NULL DEFAULT 'public',
+            expires_at TEXT
         );",
     )
     .expect("Failed to create files table");
@@ -68,6 +71,9 @@ pub fn init_db(data_dir: &str) -> DbPool {
         "ALTER TABLE files ADD COLUMN storage_backend TEXT NOT NULL DEFAULT 'telegram'",
     );
     ensure_column(&conn, "files", "storage_path", "ALTER TABLE files ADD COLUMN storage_path TEXT");
+    ensure_column(&conn, "files", "folder_path", "ALTER TABLE files ADD COLUMN folder_path TEXT NOT NULL DEFAULT ''");
+    ensure_column(&conn, "files", "link_visibility", "ALTER TABLE files ADD COLUMN link_visibility TEXT NOT NULL DEFAULT 'public'");
+    ensure_column(&conn, "files", "expires_at", "ALTER TABLE files ADD COLUMN expires_at TEXT");
 
     conn.execute_batch(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_files_short_id ON files(short_id);
@@ -306,6 +312,9 @@ pub struct FileMetadata {
     pub short_id: Option<String>,
     pub storage_backend: String,
     pub storage_path: Option<String>,
+    pub folder_path: String,
+    pub link_visibility: String,
+    pub expires_at: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -362,7 +371,7 @@ pub fn resolve_file_ids(
 pub fn get_all_files(pool: &DbPool) -> Result<Vec<FileMetadata>, AppErrorKind> {
     let conn = pool.get()?;
     let mut stmt = conn.prepare(
-        "SELECT filename, file_id, filesize, upload_date, short_id, storage_backend, storage_path FROM files ORDER BY upload_date DESC",
+        "SELECT filename, file_id, filesize, upload_date, short_id, storage_backend, storage_path, folder_path, link_visibility, expires_at FROM files ORDER BY folder_path ASC, upload_date DESC",
     )?;
 
     let files = stmt
@@ -375,6 +384,9 @@ pub fn get_all_files(pool: &DbPool) -> Result<Vec<FileMetadata>, AppErrorKind> {
                 short_id: row.get(4).ok(),
                 storage_backend: row.get::<_, String>(5).unwrap_or_else(|_| constants::STORAGE_BACKEND_TELEGRAM.to_string()),
                 storage_path: row.get(6).ok(),
+                folder_path: row.get::<_, String>(7).unwrap_or_default(),
+                link_visibility: row.get::<_, String>(8).unwrap_or_else(|_| "public".to_string()),
+                expires_at: row.get(9).ok(),
             })
         })?
         .filter_map(|r| r.ok())
@@ -386,7 +398,7 @@ pub fn get_all_files(pool: &DbPool) -> Result<Vec<FileMetadata>, AppErrorKind> {
 pub fn get_file_by_id(pool: &DbPool, identifier: &str) -> Result<Option<FileMetadata>, AppErrorKind> {
     let conn = pool.get()?;
     let result = conn.query_row(
-        "SELECT filename, filesize, upload_date, file_id, short_id, storage_backend, storage_path FROM files WHERE short_id = ?1 OR file_id = ?1",
+        "SELECT filename, filesize, upload_date, file_id, short_id, storage_backend, storage_path, folder_path, link_visibility, expires_at FROM files WHERE short_id = ?1 OR file_id = ?1",
         params![identifier],
         |row| {
             Ok(FileMetadata {
@@ -397,6 +409,9 @@ pub fn get_file_by_id(pool: &DbPool, identifier: &str) -> Result<Option<FileMeta
                 short_id: row.get(4).ok(),
                 storage_backend: row.get::<_, String>(5).unwrap_or_else(|_| constants::STORAGE_BACKEND_TELEGRAM.to_string()),
                 storage_path: row.get(6).ok(),
+                folder_path: row.get::<_, String>(7).unwrap_or_default(),
+                link_visibility: row.get::<_, String>(8).unwrap_or_else(|_| "public".to_string()),
+                expires_at: row.get(9).ok(),
             })
         },
     );
@@ -406,6 +421,82 @@ pub fn get_file_by_id(pool: &DbPool, identifier: &str) -> Result<Option<FileMeta
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.into()),
     }
+}
+
+pub fn normalize_folder_path(folder_path: &str) -> String {
+    folder_path
+        .replace('\\', "/")
+        .split('/')
+        .filter(|segment| !segment.trim().is_empty() && *segment != "." && *segment != "..")
+        .map(|segment| segment.trim())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+pub fn update_file_folder(
+    pool: &DbPool,
+    identifier: &str,
+    folder_path: &str,
+) -> Result<bool, AppErrorKind> {
+    let conn = pool.get()?;
+    let normalized = normalize_folder_path(folder_path);
+    let rows = conn.execute(
+        "UPDATE files SET folder_path = ?1 WHERE short_id = ?2 OR file_id = ?2",
+        params![normalized, identifier],
+    )?;
+    Ok(rows > 0)
+}
+
+pub fn update_file_link_settings(
+    pool: &DbPool,
+    identifier: &str,
+    link_visibility: &str,
+    expires_at: Option<&str>,
+) -> Result<bool, AppErrorKind> {
+    let conn = pool.get()?;
+    let visibility = match link_visibility.trim() {
+        "private" => "private",
+        _ => "public",
+    };
+    let expires = expires_at.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let rows = conn.execute(
+        "UPDATE files SET link_visibility = ?1, expires_at = ?2 WHERE short_id = ?3 OR file_id = ?3",
+        params![visibility, expires, identifier],
+    )?;
+    Ok(rows > 0)
+}
+
+pub fn get_file_by_webdav_path(
+    pool: &DbPool,
+    webdav_path: &str,
+) -> Result<Option<FileMetadata>, AppErrorKind> {
+    let normalized = normalize_folder_path(webdav_path);
+    let all = get_all_files(pool)?;
+    Ok(all.into_iter().find(|f| {
+        let full_path = if f.folder_path.is_empty() {
+            f.filename.clone()
+        } else {
+            format!("{}/{}", f.folder_path, f.filename)
+        };
+        full_path == normalized
+    }))
+}
+
+pub fn list_folder_paths(pool: &DbPool) -> Result<Vec<String>, AppErrorKind> {
+    let mut folders = get_all_files(pool)?
+        .into_iter()
+        .filter_map(|f| {
+            let normalized = normalize_folder_path(&f.folder_path);
+            if normalized.is_empty() {
+                None
+            } else {
+                Some(normalized)
+            }
+        })
+        .collect::<Vec<_>>();
+    folders.sort();
+    folders.dedup();
+    Ok(folders)
 }
 
 pub fn delete_file_metadata(pool: &DbPool, file_id: &str) -> Result<bool, AppErrorKind> {
@@ -540,7 +631,7 @@ pub fn add_album_items(pool: &DbPool, album_id: &str, file_ids: &[String]) -> Re
 pub fn list_album_files(pool: &DbPool, album_id: &str) -> Result<Vec<FileMetadata>, AppErrorKind> {
     let conn = pool.get()?;
     let mut stmt = conn.prepare(
-        "SELECT f.filename, f.file_id, f.filesize, f.upload_date, f.short_id, f.storage_backend, f.storage_path
+        "SELECT f.filename, f.file_id, f.filesize, f.upload_date, f.short_id, f.storage_backend, f.storage_path, f.folder_path, f.link_visibility, f.expires_at
          FROM album_items ai
          JOIN files f ON f.file_id = ai.file_id
          WHERE ai.album_id = ?1
@@ -556,6 +647,9 @@ pub fn list_album_files(pool: &DbPool, album_id: &str) -> Result<Vec<FileMetadat
                 short_id: row.get(4).ok(),
                 storage_backend: row.get::<_, String>(5).unwrap_or_else(|_| constants::STORAGE_BACKEND_TELEGRAM.to_string()),
                 storage_path: row.get(6).ok(),
+                folder_path: row.get::<_, String>(7).unwrap_or_default(),
+                link_visibility: row.get::<_, String>(8).unwrap_or_else(|_| "public".to_string()),
+                expires_at: row.get(9).ok(),
             })
         })?
         .filter_map(|r| r.ok())

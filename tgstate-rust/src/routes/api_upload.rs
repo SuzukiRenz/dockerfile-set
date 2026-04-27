@@ -15,6 +15,7 @@ use crate::error::http_error;
 use crate::state::AppState;
 use crate::storage;
 use crate::telegram::service::TelegramService;
+use crate::telegram::types::Message;
 
 #[derive(Debug, Default)]
 struct UploadAuthProgress {
@@ -273,6 +274,18 @@ async fn upload_file(
     })))
 }
 
+fn extract_uploaded_media(message: Message, default_filename: &str) -> Result<(String, i64), String> {
+    if let Some(doc) = message.document {
+        return Ok((format!("{}:{}", message.message_id, doc.file_id), doc.file_size.unwrap_or(0)));
+    }
+
+    if let Some(video) = message.video {
+        return Ok((format!("{}:{}", message.message_id, video.file_id), video.file_size.unwrap_or(0)));
+    }
+
+    Err(format!("No document or video in Telegram response for {}", default_filename))
+}
+
 async fn stream_upload_to_telegram(
     tg_service: &TelegramService,
     mut field: axum::extract::multipart::Field<'_>,
@@ -303,8 +316,8 @@ async fn stream_upload_to_telegram(
                 first_message_id = Some(message.message_id);
             }
 
-            let doc = message.document.ok_or("No document in chunk response")?;
-            chunk_ids.push(format!("{}:{}", message.message_id, doc.file_id));
+            let (composite_id, _) = extract_uploaded_media(message, &chunk_name)?;
+            chunk_ids.push(composite_id);
         }
     }
 
@@ -316,10 +329,14 @@ async fn stream_upload_to_telegram(
         let data = buffer.freeze().to_vec();
         let message = tg_service.send_document_raw(data, filename, None).await?;
 
-        let doc = message.document.ok_or("No document in response")?;
-        let composite_id = format!("{}:{}", message.message_id, doc.file_id);
+        let (composite_id, telegram_size) = extract_uploaded_media(message, filename)?;
 
-        let short_id = database::add_file_metadata(db_pool, filename, &composite_id, total_size as i64)
+        let short_id = database::add_file_metadata(
+            db_pool,
+            filename,
+            &composite_id,
+            if telegram_size > 0 { telegram_size } else { total_size as i64 },
+        )
             .map_err(|e| e.to_string())?;
         return Ok(short_id);
     }
@@ -333,8 +350,8 @@ async fn stream_upload_to_telegram(
             .send_document_raw(chunk_data, &chunk_name, first_message_id)
             .await?;
 
-        let doc = message.document.ok_or("No document in last chunk response")?;
-        chunk_ids.push(format!("{}:{}", message.message_id, doc.file_id));
+        let (composite_id, _) = extract_uploaded_media(message, &chunk_name)?;
+        chunk_ids.push(composite_id);
     }
 
     let mut manifest = String::from("tgstate-blob\n");
@@ -350,8 +367,7 @@ async fn stream_upload_to_telegram(
         .send_document_raw(manifest.into_bytes(), &manifest_name, first_message_id)
         .await?;
 
-    let doc = message.document.ok_or("No document in manifest response")?;
-    let manifest_composite = format!("{}:{}", message.message_id, doc.file_id);
+    let (manifest_composite, _) = extract_uploaded_media(message, &manifest_name)?;
 
     let short_id = database::add_file_metadata(db_pool, filename, &manifest_composite, total_size as i64)
         .map_err(|e| e.to_string())?;
@@ -372,9 +388,13 @@ pub(crate) async fn upload_bytes_to_telegram(
     if data.len() <= chunk_size {
         let total_size = data.len() as i64;
         let message = tg_service.send_document_raw(data, filename, None).await?;
-        let doc = message.document.ok_or("No document in response")?;
-        let composite_id = format!("{}:{}", message.message_id, doc.file_id);
-        return database::add_file_metadata(db_pool, filename, &composite_id, total_size)
+        let (composite_id, telegram_size) = extract_uploaded_media(message, filename)?;
+        return database::add_file_metadata(
+            db_pool,
+            filename,
+            &composite_id,
+            if telegram_size > 0 { telegram_size } else { total_size },
+        )
             .map_err(|e| e.to_string());
     }
 
@@ -391,8 +411,8 @@ pub(crate) async fn upload_bytes_to_telegram(
             first_message_id = Some(message.message_id);
         }
 
-        let doc = message.document.ok_or("No document in chunk response")?;
-        chunk_ids.push(format!("{}:{}", message.message_id, doc.file_id));
+        let (composite_id, _) = extract_uploaded_media(message, &chunk_name)?;
+        chunk_ids.push(composite_id);
     }
 
     let mut manifest = String::from("tgstate-blob\n");
@@ -408,8 +428,7 @@ pub(crate) async fn upload_bytes_to_telegram(
         .send_document_raw(manifest.into_bytes(), &manifest_name, first_message_id)
         .await?;
 
-    let doc = message.document.ok_or("No document in manifest response")?;
-    let manifest_composite = format!("{}:{}", message.message_id, doc.file_id);
+    let (manifest_composite, _) = extract_uploaded_media(message, &manifest_name)?;
 
     database::add_file_metadata(db_pool, filename, &manifest_composite, data.len() as i64)
         .map_err(|e| e.to_string())

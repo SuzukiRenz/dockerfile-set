@@ -28,6 +28,7 @@ pub fn build_file_event(
     filesize: Option<i64>,
     upload_date: Option<&str>,
     short_id: Option<&str>,
+    folder_path: Option<&str>,
 ) -> serde_json::Value {
     serde_json::json!({
         "action": action,
@@ -36,5 +37,6 @@ pub fn build_file_event(
         "filesize": filesize,
         "upload_date": upload_date,
         "short_id": short_id,
+        "folder_path": folder_path,
     })
 }

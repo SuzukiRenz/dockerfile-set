@@ -22,6 +22,7 @@ pub struct Message {
     pub chat: Chat,
     pub text: Option<String>,
     pub document: Option<Document>,
+    pub video: Option<Video>,
     pub photo: Option<Vec<PhotoSize>>,
     pub date: Option<i64>,
     pub reply_to_message: Option<Box<Message>>,
@@ -35,6 +36,14 @@ pub struct Chat {
 
 #[derive(Debug, Deserialize)]
 pub struct Document {
+    pub file_id: String,
+    pub file_name: Option<String>,
+    pub file_size: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct Video {
     pub file_id: String,
     pub file_name: Option<String>,
     pub file_size: Option<i64>,
