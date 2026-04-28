@@ -44,7 +44,6 @@ pub async fn run_bot_polling(
     }
 
     tracing::info!("Bot 轮询已启动");
-    let mut conflict_logged = false;
 
     loop {
         tokio::select! {
@@ -55,7 +54,6 @@ pub async fn run_bot_polling(
             result = get_updates(&client, &bot_token, offset, constants::BOT_POLL_TIMEOUT_SECS as i64) => {
                 match result {
                     Ok(updates) => {
-                        conflict_logged = false;
                         for update in updates {
                             offset = update.update_id + 1;
                             process_update(
@@ -71,12 +69,7 @@ pub async fn run_bot_polling(
                     Err(e) => {
                         let is_conflict = e.contains("Conflict:") && e.contains("other getUpdates request");
                         if is_conflict {
-                            if !conflict_logged {
-                                tracing::error!("getUpdates 冲突: {}", e);
-                                conflict_logged = true;
-                            } else {
-                                tracing::warn!("检测到另一个 Bot 实例正在轮询，当前实例将在 30 秒后停止重试");
-                            }
+                            tracing::error!("getUpdates 冲突: {}", e);
                             tokio::time::sleep(Duration::from_secs(30)).await;
                             return Err("Telegram getUpdates conflict: another bot instance is running".into());
                         }
