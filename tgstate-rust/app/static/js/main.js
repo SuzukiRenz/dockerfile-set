@@ -59,17 +59,8 @@ document.addEventListener('DOMContentLoaded', () => {
         return url;
     }
 
-    function toRfc3339FromLocalInput(value) {
-        if (!value) return null;
-        const date = new Date(value);
-        if (isNaN(date.getTime())) return null;
-        return date.toISOString();
-    }
-
     function formatLinkSettings(item) {
-        const visibility = item.dataset.linkVisibility || 'public';
-        const expiresAt = item.dataset.expiresAt || '';
-        return expiresAt ? `${visibility} · ${expiresAt}` : visibility;
+        return item.dataset.linkVisibility || 'public';
     }
 
     function itemMatchesScope(item, selectedFolder, includeSubfolders) {
@@ -80,10 +71,10 @@ document.addEventListener('DOMContentLoaded', () => {
         return false;
     }
 
-    function updateItemLinkSettings(item, visibility, expiresAt) {
+    function updateItemLinkSettings(item, visibility) {
         if (!item) return;
         item.dataset.linkVisibility = visibility || 'public';
-        item.dataset.expiresAt = expiresAt || '';
+        delete item.dataset.expiresAt;
         const label = item.querySelector('.link-settings-text');
         if (label) {
             label.textContent = formatLinkSettings(item);
@@ -107,6 +98,8 @@ document.addEventListener('DOMContentLoaded', () => {
         return parts.join('/');
     }
 
+    let folderSettingsMap = new Map();
+
     function getFolderEntries() {
         const folders = new Map();
         getAllItems().forEach(item => {
@@ -115,10 +108,13 @@ document.addEventListener('DOMContentLoaded', () => {
             folderPath.split('/').filter(Boolean).forEach(part => {
                 acc = acc ? `${acc}/${part}` : part;
                 if (!folders.has(acc)) {
+                    const setting = folderSettingsMap.get(acc);
                     folders.set(acc, {
                         path: acc,
                         name: part,
-                        parent: getParentFolder(acc)
+                        parent: getParentFolder(acc),
+                        visibility: setting?.link_visibility || setting?.inherited_visibility || 'public',
+                        explicitVisibility: setting?.explicit_visibility || null,
                     });
                 }
             });
@@ -159,9 +155,11 @@ document.addEventListener('DOMContentLoaded', () => {
         folders.forEach(folder => {
             const depth = folder.path.split('/').length - 1;
             const isActive = currentFolderPath === folder.path;
+            const badge = folder.visibility === 'private' ? '🔒' : '🌍';
             html.push(`
-                <button type="button" class="btn btn-ghost btn-sm folder-nav-item${isActive ? ' active' : ''}" data-folder-path="${folder.path}" style="justify-content: flex-start; height: 34px; font-size: 13px; padding-left: ${12 + depth * 16}px;">
-                    📁 ${folder.name}
+                <button type="button" class="btn btn-ghost btn-sm folder-nav-item${isActive ? ' active' : ''}" data-folder-path="${folder.path}" style="justify-content: space-between; height: auto; min-height: 34px; font-size: 13px; padding-left: ${12 + depth * 16}px; gap: 8px;">
+                    <span style="display:flex; align-items:center; gap:6px; min-width:0;"><span>📁</span><span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${folder.name}</span></span>
+                    <span style="font-size:12px; color: var(--text-secondary);">${badge}</span>
                 </button>
             `);
         });
@@ -240,11 +238,30 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    function updateFolderSettingsPanel() {
+        const folderSettingsCurrent = document.getElementById('folder-settings-current');
+        const folderVisibilityInput = document.getElementById('folder-visibility-input');
+        if (!folderSettingsCurrent || !folderVisibilityInput) return;
+
+        if (!currentFolderPath) {
+            folderSettingsCurrent.textContent = '请选择左侧文件夹';
+            folderVisibilityInput.value = 'public';
+            return;
+        }
+
+        const setting = folderSettingsMap.get(currentFolderPath);
+        const visibility = setting?.link_visibility || setting?.inherited_visibility || 'public';
+        const sourceText = setting?.explicit_visibility ? '显式配置' : '继承配置';
+        folderSettingsCurrent.textContent = `${currentFolderPath} · ${visibility} · ${sourceText}`;
+        folderVisibilityInput.value = visibility;
+    }
+
     function renderFolderView() {
         if (folderTree || currentFolderGrid || folderBreadcrumb) {
             renderFolderTree();
             renderFolderBreadcrumb();
             renderCurrentFolderGrid();
+            updateFolderSettingsPanel();
         }
         renderFolderTableVisibility();
         updateBatchControls();
@@ -501,10 +518,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const copyLinksBtn = document.getElementById('copy-links-btn');
     const moveFolderBtn = document.getElementById('move-folder-btn');
     const saveLinkSettingsBtn = document.getElementById('save-link-settings-btn');
+    const saveFolderSettingsBtn = document.getElementById('save-folder-settings-btn');
     const folderPathInput = document.getElementById('folder-path-input');
     const linkVisibilityInput = document.getElementById('link-visibility-input');
-    const linkExpiresInput = document.getElementById('link-expires-input');
+    const folderVisibilityInput = document.getElementById('folder-visibility-input');
+    const folderApplyChildrenToggle = document.getElementById('folder-apply-children-toggle');
     const includeSubfoldersToggle = document.getElementById('include-subfolders-toggle');
+    const imageSortSelect = document.getElementById('image-sort-select');
     const selectionCounter = document.getElementById('selection-counter');
     const batchActionsBar = document.getElementById('batch-actions-bar');
     const formatOptions = document.querySelectorAll('.format-option');
@@ -668,7 +688,6 @@ document.addEventListener('DOMContentLoaded', () => {
         saveLinkSettingsBtn.addEventListener('click', async () => {
             const checkedItems = getCheckedItems();
             const visibility = (linkVisibilityInput?.value || 'public').trim() === 'private' ? 'private' : 'public';
-            const expiresAt = toRfc3339FromLocalInput(linkExpiresInput?.value || '');
             const includeSubfolders = !!includeSubfoldersToggle?.checked;
             const selectedFolder = normalizeFolderPathClient((folderPathInput?.value || '').trim());
 
@@ -690,8 +709,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        link_visibility: visibility,
-                        expires_at: expiresAt
+                        link_visibility: visibility
                     })
                 }).then(async res => ({
                     ok: res.ok,
@@ -709,15 +727,103 @@ document.addEventListener('DOMContentLoaded', () => {
                     return;
                 }
                 updatedCount += 1;
-                updateItemLinkSettings(item, data.link_visibility || visibility, data.expires_at || '');
+                updateItemLinkSettings(item, data.link_visibility || visibility);
             });
 
             if (updatedCount > 0 && window.Toast) {
-                Toast.show(`已更新 ${updatedCount} 个文件的短链设置`);
+                Toast.show(`已更新 ${updatedCount} 个文件的可见性`);
             }
             if (failedCount > 0 && window.Toast) {
                 Toast.show(`${failedCount} 个文件更新失败`, 'error');
             }
+        });
+    }
+
+    if (saveFolderSettingsBtn) {
+        saveFolderSettingsBtn.addEventListener('click', async () => {
+            if (!currentFolderPath) {
+                if (window.Toast) Toast.show('请先在左侧选择文件夹', 'error');
+                return;
+            }
+
+            const visibility = (folderVisibilityInput?.value || 'public').trim() === 'private' ? 'private' : 'public';
+            const applyToChildren = !!folderApplyChildrenToggle?.checked;
+
+            const res = await fetch('/api/folders', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    folder_path: currentFolderPath,
+                    link_visibility: visibility,
+                    apply_to_children: applyToChildren
+                })
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                if (window.Toast) Toast.show(data?.detail?.message || data?.message || '保存文件夹配置失败', 'error');
+                return;
+            }
+
+            folderSettingsMap.set(currentFolderPath, {
+                folder_path: currentFolderPath,
+                link_visibility: visibility,
+                explicit_visibility: visibility,
+                inherited_visibility: visibility,
+            });
+
+            const normalizedCurrent = `${currentFolderPath}/`;
+            getAllItems().forEach(item => {
+                const itemFolder = normalizeFolderPathClient(item.dataset.folderPath || '');
+                const hit = applyToChildren
+                    ? (itemFolder === currentFolderPath || itemFolder.startsWith(normalizedCurrent))
+                    : itemFolder === currentFolderPath;
+                if (hit) {
+                    updateItemLinkSettings(item, visibility);
+                }
+            });
+
+            renderFolderView();
+            if (window.Toast) Toast.show(`已保存文件夹配置，更新 ${data.updated_files || 0} 个文件`);
+        });
+    }
+
+    async function loadFolderSettings() {
+        if (!folderTree) return;
+        try {
+            const res = await fetch('/api/folders');
+            const data = await res.json().catch(() => ({}));
+            const folders = Array.isArray(data?.folders) ? data.folders : [];
+            folderSettingsMap = new Map(folders.map(folder => [normalizeFolderPathClient(folder.folder_path || ''), folder]));
+            renderFolderView();
+        } catch (_) {}
+    }
+
+    function sortImageCards() {
+        if (!imageSortSelect) return;
+        const container = document.getElementById('file-list-disk');
+        if (!container || !document.querySelector('.image-grid')) return;
+        const cards = Array.from(container.querySelectorAll('.image-card'));
+        const mode = imageSortSelect.value || 'date_desc';
+
+        const getDate = (el) => new Date(el.dataset.uploadDate || 0).getTime() || 0;
+        const getSize = (el) => Number(el.dataset.filesize || 0);
+        const getName = (el) => String(el.dataset.filename || '').toLowerCase();
+
+        cards.sort((a, b) => {
+            if (mode === 'date_asc') return getDate(a) - getDate(b);
+            if (mode === 'size_desc') return getSize(b) - getSize(a);
+            if (mode === 'size_asc') return getSize(a) - getSize(b);
+            if (mode === 'name_asc') return getName(a).localeCompare(getName(b), 'zh-CN');
+            return getDate(b) - getDate(a);
+        });
+
+        cards.forEach(card => container.appendChild(card));
+    }
+
+    if (imageSortSelect) {
+        imageSortSelect.addEventListener('change', () => {
+            sortImageCards();
+            renderFolderView();
         });
     }
 
@@ -780,7 +886,7 @@ document.addEventListener('DOMContentLoaded', () => {
         let html = '';
         if (isGridView) {
              html = `
-                <div class="file-item image-card" style="border: 1px solid var(--border-color); border-radius: var(--radius-md); overflow: hidden; background: var(--bg-body);" id="file-item-${safeId}" data-file-id="${file.file_id}" data-file-url="${fileUrl}" data-filename="${file.filename}" data-short-id="${file.short_id || ''}" data-folder-path="${folderPath}" data-link-visibility="${file.link_visibility || 'public'}" data-expires-at="${file.expires_at || ''}">
+                <div class="file-item image-card" style="border: 1px solid var(--border-color); border-radius: var(--radius-md); overflow: hidden; background: var(--bg-body);" id="file-item-${safeId}" data-file-id="${file.file_id}" data-file-url="${fileUrl}" data-filename="${file.filename}" data-short-id="${file.short_id || ''}" data-folder-path="${folderPath}" data-link-visibility="${file.link_visibility || 'public'}" data-filesize="${file.filesize || 0}" data-upload-date="${file.upload_date || ''}">
                     <div style="position: relative; aspect-ratio: 16/9; background: linear-gradient(135deg, rgba(99,102,241,0.12), rgba(59,130,246,0.08)); border-bottom: 1px solid var(--border-color);">
                         <button type="button" class="preview-image-btn" style="position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; color: var(--text-primary); cursor: pointer; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;">
                             <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
@@ -793,7 +899,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     <div style="padding: 12px;">
                         <div class="text-sm font-medium" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 4px;" title="${file.filename}">${file.filename}</div>
                         <div class="text-sm text-muted folder-path-text" style="margin-bottom: 4px;">${folderPath}</div>
-                        <div class="text-sm text-muted link-settings-text" style="margin-bottom: 4px;">${file.expires_at ? `${file.link_visibility || 'public'} · ${file.expires_at}` : (file.link_visibility || 'public')}</div>
+                        <div class="text-sm text-muted link-settings-text" style="margin-bottom: 4px;">${file.link_visibility || 'public'}</div>
                         <div class="text-sm text-muted" style="margin-bottom: 12px;">${formattedSize}</div>
                         <div style="display: flex; gap: 8px;">
                             <button class="btn btn-secondary btn-sm copy-link-btn" style="flex: 1; height: 32px;">复制</button>
@@ -805,7 +911,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 </div>`;
         } else {
             html = `
-                <tr class="file-item" style="border-bottom: 1px solid var(--border-color);" id="file-item-${safeId}" data-file-id="${file.file_id}" data-file-url="${fileUrl}" data-filename="${file.filename}" data-short-id="${file.short_id || ''}" data-folder-path="${folderPath}" data-link-visibility="${file.link_visibility || 'public'}" data-expires-at="${file.expires_at || ''}">
+                <tr class="file-item" style="border-bottom: 1px solid var(--border-color);" id="file-item-${safeId}" data-file-id="${file.file_id}" data-file-url="${fileUrl}" data-filename="${file.filename}" data-short-id="${file.short_id || ''}" data-folder-path="${folderPath}" data-link-visibility="${file.link_visibility || 'public'}">
                     <td style="padding: 12px 16px;"><input type="checkbox" class="file-checkbox" data-file-id="${file.file_id}"></td>
                     <td style="padding: 12px 16px;">
                         <div style="display: flex; align-items: center; gap: 8px;">
@@ -813,7 +919,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             <div style="display: flex; flex-direction: column; gap: 2px; min-width: 0;">
                                 <span class="text-sm font-medium" style="color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${file.filename}</span>
                                 <span class="text-sm text-muted folder-path-text">${folderPath}</span>
-                                <span class="text-sm text-muted link-settings-text">${file.expires_at ? `${file.link_visibility || 'public'} · ${file.expires_at}` : (file.link_visibility || 'public')}</span>
+                                <span class="text-sm text-muted link-settings-text">${file.link_visibility || 'public'}</span>
                             </div>
                         </div>
                     </td>
@@ -836,9 +942,12 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         container.insertAdjacentHTML('afterbegin', html);
+        sortImageCards();
         renderFolderView();
     }
 
+    loadFolderSettings();
+    sortImageCards();
     renderFolderView();
 
     // --- Global Helpers ---

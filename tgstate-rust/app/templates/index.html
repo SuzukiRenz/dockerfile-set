@@ -60,8 +60,7 @@
                 <option value="public">公开</option>
                 <option value="private">私密</option>
             </select>
-            <input type="datetime-local" id="link-expires-input" class="input-field datetime-field" style="height: 32px; min-width: 210px; padding: 0 10px;">
-            <button id="save-link-settings-btn" class="btn btn-secondary btn-sm" style="height: 32px; font-size: 13px;">短链设置</button>
+            <button id="save-link-settings-btn" class="btn btn-secondary btn-sm" style="height: 32px; font-size: 13px;">文件可见性</button>
             <button id="copy-links-btn" class="btn btn-secondary btn-sm" style="height: 32px; font-size: 13px;">复制链接</button>
             <button id="batch-delete-btn" class="btn btn-secondary btn-sm" style="height: 32px; font-size: 13px; color: var(--danger-color);">删除</button>
         </div>
@@ -75,6 +74,19 @@
                 <button type="button" id="folder-nav-root-btn" class="btn btn-ghost btn-sm" style="height: 28px; font-size: 12px;">根目录</button>
             </div>
             <div id="folder-tree" style="display: flex; flex-direction: column; gap: 6px;"></div>
+            <div style="border-top: 1px solid var(--border-color); padding-top: 12px; display: flex; flex-direction: column; gap: 8px;">
+                <div style="font-size: 13px; color: var(--text-secondary);">文件夹可见性</div>
+                <div id="folder-settings-current" class="text-sm text-muted">请选择左侧文件夹</div>
+                <select id="folder-visibility-input" class="input-field" style="height: 36px; width: 100%; padding: 0 10px;">
+                    <option value="public">公开</option>
+                    <option value="private">私密</option>
+                </select>
+                <label style="display: flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 13px;">
+                    <input type="checkbox" id="folder-apply-children-toggle" checked>
+                    影响子文件夹和文件
+                </label>
+                <button type="button" id="save-folder-settings-btn" class="btn btn-secondary btn-sm" style="height: 34px; font-size: 13px;">保存文件夹配置</button>
+            </div>
         </div>
 
         <div class="card" style="padding: 0; overflow: hidden;">
@@ -103,7 +115,7 @@
                     <tbody id="file-list-disk">
                         {% if files %}
                             {% for file in files %}
-                            <tr class="file-item" style="border-bottom: 1px solid var(--border-color);" id="file-item-{{ file.file_id | replace(from=':', to='-') }}" data-short-id="{{ file.short_id }}" data-file-id="{{ file.file_id }}" data-filename="{{ file.filename }}" data-file-url="/d/{{ file.display_id }}" data-folder-path="{{ file.folder_path }}" data-link-visibility="{{ file.link_visibility }}" data-expires-at="{{ file.expires_at | default(value='') }}">
+                            <tr class="file-item" style="border-bottom: 1px solid var(--border-color);" id="file-item-{{ file.file_id | replace(from=':', to='-') }}" data-short-id="{{ file.short_id }}" data-file-id="{{ file.file_id }}" data-filename="{{ file.filename }}" data-file-url="/d/{{ file.display_id }}" data-folder-path="{{ file.folder_path }}" data-link-visibility="{{ file.link_visibility }}">
                                 <td style="padding: 12px 16px;"><input type="checkbox" class="file-checkbox" data-file-id="{{ file.file_id }}"></td>
                                 <td style="padding: 12px 16px;">
                                     <div style="display: flex; align-items: center; gap: 8px;">
@@ -111,7 +123,7 @@
                                         <div style="display: flex; flex-direction: column; gap: 2px; min-width: 0;">
                                             <span class="text-sm font-medium" style="color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ file.filename }}</span>
                                             <span class="text-sm text-muted folder-path-text">{{ file.folder_path | default(value='') }}</span>
-                                            <span class="text-sm text-muted link-settings-text">{{ file.link_visibility }}{% if file.expires_at %} · {{ file.expires_at }}{% endif %}</span>
+                                            <span class="text-sm text-muted link-settings-text">{{ file.link_visibility }}</span>
                                         </div>
                                     </div>
                                 </td>
@@ -146,5 +158,5 @@
     </div>
     {% endif %}
 </div>
-<script src="/static/js/main.js?v=4.3"></script>
+<script src="/static/js/main.js?v=4.4"></script>
 {% endblock %}

@@ -477,9 +477,14 @@ tr:hover td .actions { opacity: 1; }
 
 /* --- Image Grid --- */
 .image-grid {
+    width: 100%;
+}
+.image-grid .file-list {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+    width: 100%;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
     gap: 16px;
+    align-items: stretch;
 }
 .image-card {
     background: var(--bg-surface);

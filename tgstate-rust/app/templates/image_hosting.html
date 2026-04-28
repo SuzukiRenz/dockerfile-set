@@ -5,12 +5,19 @@
 {% block content %}
 <div style="display: flex; flex-direction: column; gap: 24px;">
     <!-- Header -->
-    <div class="flex-between">
+    <div class="flex-between" style="gap: 12px; align-items: center; flex-wrap: wrap;">
         <h1 style="font-size: 24px; font-weight: 700;">图床模式</h1>
-        <div style="display: flex; gap: 12px; flex: 1; justify-content: flex-end; min-width: 0;">
+        <div style="display: flex; gap: 12px; flex: 1; justify-content: flex-end; min-width: 0; flex-wrap: wrap; align-items: center;">
             <div class="input-group" style="margin-bottom: 0; max-width: 300px; width: 100%;">
                 <input type="text" id="file-search" class="input-field" placeholder="搜索图片..." style="width: 100%;">
             </div>
+            <select id="image-sort-select" class="input-field" style="height: 40px; min-width: 180px; padding: 0 10px;">
+                <option value="date_desc">按日期：最新</option>
+                <option value="date_asc">按日期：最早</option>
+                <option value="size_desc">按大小：从大到小</option>
+                <option value="size_asc">按大小：从小到大</option>
+                <option value="name_asc">按名称：A-Z</option>
+            </select>
         </div>
     </div>
 
@@ -42,7 +49,7 @@
     <!-- Batch Actions -->
     <div class="flex-between hidden" id="batch-actions-bar" style="background: var(--bg-surface-hover); padding: 12px 16px; border-radius: var(--radius-md);">
         <span class="text-sm font-medium"><span id="selection-counter">0</span> 项已选</span>
-        <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+        <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; width: 100%;">
             <input type="text" id="folder-path-input" class="input-field" placeholder="例如：项目A/海报" style="height: 32px; min-width: 180px; padding: 0 10px;">
             <button id="move-folder-btn" class="btn btn-secondary btn-sm" style="height: 32px; font-size: 13px;">移动到文件夹</button>
             <label style="display: flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 13px;">
@@ -53,8 +60,7 @@
                 <option value="public">公开</option>
                 <option value="private">私密</option>
             </select>
-            <input type="datetime-local" id="link-expires-input" class="input-field datetime-field" style="height: 32px; min-width: 210px; padding: 0 10px;">
-            <button id="save-link-settings-btn" class="btn btn-secondary btn-sm" style="height: 32px; font-size: 13px;">短链设置</button>
+            <button id="save-link-settings-btn" class="btn btn-secondary btn-sm" style="height: 32px; font-size: 13px;">文件可见性</button>
             <div class="link-format-selector" style="display: flex; gap: 4px; margin-right: 8px;">
                 <button class="btn btn-ghost btn-sm active format-option" data-format="url" style="height: 32px; font-size: 12px;">URL</button>
                 <button class="btn btn-ghost btn-sm format-option" data-format="markdown" style="height: 32px; font-size: 12px;">MD</button>
@@ -72,7 +78,7 @@
         <div class="file-list" id="file-list-disk" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 16px;">
             {% if files %}
                 {% for file in files %}
-                <div class="file-item image-card" style="border: 1px solid var(--border-color); border-radius: var(--radius-md); overflow: hidden; background: var(--bg-body);" id="file-item-{{ file.file_id | replace(from=':', to='-') }}" data-file-id="{{ file.file_id }}" data-file-url="/d/{{ file.display_id }}" data-filename="{{ file.filename }}" data-short-id="{{ file.short_id }}" data-folder-path="{{ file.folder_path }}" data-link-visibility="{{ file.link_visibility }}" data-expires-at="{{ file.expires_at | default(value='') }}">
+                <div class="file-item image-card" style="border: 1px solid var(--border-color); border-radius: var(--radius-md); overflow: hidden; background: var(--bg-body);" id="file-item-{{ file.file_id | replace(from=':', to='-') }}" data-file-id="{{ file.file_id }}" data-file-url="/d/{{ file.display_id }}" data-filename="{{ file.filename }}" data-short-id="{{ file.short_id }}" data-folder-path="{{ file.folder_path }}" data-link-visibility="{{ file.link_visibility }}" data-filesize="{{ file.filesize }}" data-upload-date="{{ file.upload_date }}">
                     <div style="position: relative; aspect-ratio: 16/9; background: linear-gradient(135deg, rgba(99,102,241,0.12), rgba(59,130,246,0.08)); border-bottom: 1px solid var(--border-color);">
                         <button type="button" class="preview-image-btn" style="position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; color: var(--text-primary); cursor: pointer; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;">
                             <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
@@ -85,7 +91,7 @@
                     <div style="padding: 12px;">
                         <div class="text-sm font-medium" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 4px;" title="{{ file.filename }}">{{ file.filename }}</div>
                         <div class="text-sm text-muted folder-path-text" style="margin-bottom: 4px;">{{ file.folder_path | default(value='') }}</div>
-                        <div class="text-sm text-muted link-settings-text" style="margin-bottom: 4px;">{{ file.link_visibility }}{% if file.expires_at %} · {{ file.expires_at }}{% endif %}</div>
+                        <div class="text-sm text-muted link-settings-text" style="margin-bottom: 4px;">{{ file.link_visibility }}</div>
                         <div class="text-sm text-muted" style="margin-bottom: 12px;">{{ file.filesize_mb }} MB</div>
                         <div style="display: flex; gap: 8px;">
                             <button class="btn btn-secondary btn-sm copy-link-btn" style="flex: 1; height: 32px;">复制</button>
@@ -116,5 +122,5 @@
     </div>
 </div>
 
-<script src="/static/js/main.js?v=4.3"></script>
+<script src="/static/js/main.js?v=4.4"></script>
 {% endblock %}

@@ -34,7 +34,13 @@ pub struct MoveFileRequest {
 #[derive(Deserialize)]
 pub struct UpdateLinkSettingsRequest {
     link_visibility: String,
-    expires_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateFolderSettingsRequest {
+    folder_path: String,
+    link_visibility: String,
+    apply_to_children: Option<bool>,
 }
 
 fn get_telegram_service(state: &AppState) -> Result<TelegramService, impl IntoResponse> {
@@ -105,14 +111,6 @@ fn chunk_download_failed_response(chunk_id: &str) -> Response {
     .into_response()
 }
 
-fn is_link_expired(meta: &database::FileMetadata) -> bool {
-    meta.expires_at
-        .as_deref()
-        .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
-        .map(|dt| dt.with_timezone(&chrono::Utc) <= chrono::Utc::now())
-        .unwrap_or(false)
-}
-
 fn extract_session_cookie(headers: &HeaderMap) -> Option<String> {
     headers
         .get(axum::http::header::COOKIE)
@@ -127,10 +125,6 @@ fn extract_session_cookie(headers: &HeaderMap) -> Option<String> {
 }
 
 fn check_link_access(state: &AppState, meta: &database::FileMetadata, headers: &HeaderMap) -> Option<Response> {
-    if is_link_expired(meta) {
-        return Some(http_error(StatusCode::GONE, "短链已过期", "link_expired").into_response());
-    }
-
     if meta.link_visibility == "private" {
         let cookie = extract_session_cookie(headers);
         let active_pwd = config::get_active_password(&state.settings, &state.db_pool);
@@ -603,7 +597,25 @@ async fn get_files_list(State(state): State<Arc<AppState>>) -> impl IntoResponse
 
 async fn get_folders_list(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let folders = database::list_folder_paths(&state.db_pool).unwrap_or_default();
-    Json(serde_json::json!({ "folders": folders }))
+    let settings = database::list_folder_settings(&state.db_pool).unwrap_or_default();
+    let folder_items = folders
+        .into_iter()
+        .map(|folder_path| {
+            let inherited_visibility = database::get_folder_visibility(&state.db_pool, &folder_path)
+                .unwrap_or_else(|_| "public".to_string());
+            let explicit_visibility = settings
+                .iter()
+                .find(|item| item.folder_path == folder_path)
+                .map(|item| item.link_visibility.clone());
+            serde_json::json!({
+                "folder_path": folder_path,
+                "link_visibility": explicit_visibility.unwrap_or_else(|| inherited_visibility.clone()),
+                "explicit_visibility": explicit_visibility,
+                "inherited_visibility": inherited_visibility,
+            })
+        })
+        .collect::<Vec<_>>();
+    Json(serde_json::json!({ "folders": folder_items }))
 }
 
 async fn move_file(
@@ -643,26 +655,40 @@ async fn update_link_settings(
         "private" => "private",
         _ => "public",
     };
-    let expires_at = payload
-        .expires_at
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(str::to_string);
 
-    if let Some(ref value) = expires_at {
-        if chrono::DateTime::parse_from_rfc3339(value).is_err() {
-            return http_error(StatusCode::BAD_REQUEST, "expires_at 必须是 RFC3339 时间", "invalid_expires_at").into_response();
-        }
-    }
-
-    match database::update_file_link_settings(&state.db_pool, &file_id, visibility, expires_at.as_deref()) {
+    match database::update_file_link_settings(&state.db_pool, &file_id, visibility, None) {
         Ok(true) => Json(serde_json::json!({
             "status": "ok",
             "link_visibility": visibility,
-            "expires_at": expires_at,
         })).into_response(),
         Ok(false) => http_error(StatusCode::NOT_FOUND, "文件不存在", "not_found").into_response(),
+        Err(e) => crate::error::AppError::from(e).into_response(),
+    }
+}
+
+async fn update_folder_settings(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<UpdateFolderSettingsRequest>,
+) -> impl IntoResponse {
+    let normalized = database::normalize_folder_path(&payload.folder_path);
+    if normalized.is_empty() {
+        return http_error(StatusCode::BAD_REQUEST, "文件夹路径不能为空", "invalid_folder_path").into_response();
+    }
+
+    let visibility = match payload.link_visibility.trim() {
+        "private" => "private",
+        _ => "public",
+    };
+    let apply_to_children = payload.apply_to_children.unwrap_or(true);
+
+    match database::set_folder_visibility(&state.db_pool, &normalized, visibility, apply_to_children) {
+        Ok(updated_files) => Json(serde_json::json!({
+            "status": "ok",
+            "folder_path": normalized,
+            "link_visibility": visibility,
+            "apply_to_children": apply_to_children,
+            "updated_files": updated_files,
+        })).into_response(),
         Err(e) => crate::error::AppError::from(e).into_response(),
     }
 }
@@ -813,7 +839,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/files/:file_id", delete(delete_file))
         .route("/api/files/:file_id/move", post(move_file))
         .route("/api/files/:file_id/link-settings", post(update_link_settings))
-        .route("/api/folders", get(get_folders_list))
+        .route("/api/folders", get(get_folders_list).post(update_folder_settings))
         .route("/api/batch_delete", post(batch_delete_files))
         .route(
             "/d/:file_id/:filename",

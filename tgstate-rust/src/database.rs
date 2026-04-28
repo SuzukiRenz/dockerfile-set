@@ -63,6 +63,15 @@ pub fn init_db(data_dir: &str) -> DbPool {
     )
     .expect("Failed to create files table");
 
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS folder_settings (
+            folder_path TEXT PRIMARY KEY,
+            link_visibility TEXT NOT NULL DEFAULT 'public',
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );",
+    )
+    .expect("Failed to create folder_settings table");
+
     ensure_column(&conn, "files", "short_id", "ALTER TABLE files ADD COLUMN short_id TEXT");
     ensure_column(
         &conn,
@@ -74,11 +83,15 @@ pub fn init_db(data_dir: &str) -> DbPool {
     ensure_column(&conn, "files", "folder_path", "ALTER TABLE files ADD COLUMN folder_path TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "files", "link_visibility", "ALTER TABLE files ADD COLUMN link_visibility TEXT NOT NULL DEFAULT 'public'");
     ensure_column(&conn, "files", "expires_at", "ALTER TABLE files ADD COLUMN expires_at TEXT");
+    ensure_column(&conn, "folder_settings", "link_visibility", "ALTER TABLE folder_settings ADD COLUMN link_visibility TEXT NOT NULL DEFAULT 'public'");
+    ensure_column(&conn, "folder_settings", "updated_at", "ALTER TABLE folder_settings ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP");
 
     conn.execute_batch(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_files_short_id ON files(short_id);
          CREATE INDEX IF NOT EXISTS idx_files_upload_date ON files(upload_date DESC);
-         CREATE INDEX IF NOT EXISTS idx_files_storage_backend ON files(storage_backend);",
+         CREATE INDEX IF NOT EXISTS idx_files_storage_backend ON files(storage_backend);
+         CREATE INDEX IF NOT EXISTS idx_files_folder_path ON files(folder_path);
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_folder_settings_path ON folder_settings(folder_path);",
     )
     .ok();
 
@@ -318,6 +331,13 @@ pub struct FileMetadata {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct FolderSetting {
+    pub folder_path: String,
+    pub link_visibility: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Album {
     pub album_id: String,
     pub title: String,
@@ -451,19 +471,122 @@ pub fn update_file_link_settings(
     pool: &DbPool,
     identifier: &str,
     link_visibility: &str,
-    expires_at: Option<&str>,
+    _expires_at: Option<&str>,
 ) -> Result<bool, AppErrorKind> {
     let conn = pool.get()?;
     let visibility = match link_visibility.trim() {
         "private" => "private",
         _ => "public",
     };
-    let expires = expires_at.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
     let rows = conn.execute(
-        "UPDATE files SET link_visibility = ?1, expires_at = ?2 WHERE short_id = ?3 OR file_id = ?3",
-        params![visibility, expires, identifier],
+        "UPDATE files SET link_visibility = ?1, expires_at = NULL WHERE short_id = ?2 OR file_id = ?2",
+        params![visibility, identifier],
     )?;
     Ok(rows > 0)
+}
+
+pub fn set_folder_visibility(
+    pool: &DbPool,
+    folder_path: &str,
+    link_visibility: &str,
+    apply_to_children: bool,
+) -> Result<usize, AppErrorKind> {
+    let conn = pool.get()?;
+    let normalized = normalize_folder_path(folder_path);
+    let visibility = match link_visibility.trim() {
+        "private" => "private",
+        _ => "public",
+    };
+
+    if normalized.is_empty() {
+        return Ok(0);
+    }
+
+    conn.execute(
+        "INSERT INTO folder_settings (folder_path, link_visibility, updated_at)
+         VALUES (?1, ?2, CURRENT_TIMESTAMP)
+         ON CONFLICT(folder_path) DO UPDATE SET
+         link_visibility = excluded.link_visibility,
+         updated_at = CURRENT_TIMESTAMP",
+        params![normalized, visibility],
+    )?;
+
+    let rows = if apply_to_children {
+        let prefix = format!("{}/%", normalized);
+        conn.execute(
+            "UPDATE files
+             SET link_visibility = ?1, expires_at = NULL
+             WHERE folder_path = ?2 OR folder_path LIKE ?3",
+            params![visibility, normalized, prefix],
+        )?
+    } else {
+        conn.execute(
+            "UPDATE files
+             SET link_visibility = ?1, expires_at = NULL
+             WHERE folder_path = ?2",
+            params![visibility, normalized],
+        )?
+    };
+
+    Ok(rows)
+}
+
+pub fn list_folder_settings(pool: &DbPool) -> Result<Vec<FolderSetting>, AppErrorKind> {
+    let conn = pool.get()?;
+    let mut stmt = conn.prepare(
+        "SELECT folder_path, link_visibility, COALESCE(updated_at, '')
+         FROM folder_settings
+         ORDER BY folder_path ASC",
+    )?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(FolderSetting {
+                folder_path: row.get(0)?,
+                link_visibility: row.get::<_, String>(1).unwrap_or_else(|_| "public".to_string()),
+                updated_at: row.get::<_, String>(2).unwrap_or_default(),
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(rows)
+}
+
+pub fn get_folder_visibility(pool: &DbPool, folder_path: &str) -> Result<String, AppErrorKind> {
+    let normalized = normalize_folder_path(folder_path);
+    if normalized.is_empty() {
+        return Ok("public".to_string());
+    }
+
+    let conn = pool.get()?;
+    let exact: Option<String> = conn
+        .query_row(
+            "SELECT link_visibility FROM folder_settings WHERE folder_path = ?1",
+            params![normalized],
+            |row| row.get(0),
+        )
+        .ok();
+
+    if let Some(value) = exact {
+        return Ok(if value == "private" { "private".to_string() } else { "public".to_string() });
+    }
+
+    let mut current = normalized.as_str();
+    while let Some((parent, _)) = current.rsplit_once('/') {
+        let inherited: Option<String> = conn
+            .query_row(
+                "SELECT link_visibility FROM folder_settings WHERE folder_path = ?1",
+                params![parent],
+                |row| row.get(0),
+            )
+            .ok();
+        if let Some(value) = inherited {
+            return Ok(if value == "private" { "private".to_string() } else { "public".to_string() });
+        }
+        current = parent;
+    }
+
+    Ok("public".to_string())
 }
 
 pub fn get_file_by_webdav_path(
