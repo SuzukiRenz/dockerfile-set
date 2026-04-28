@@ -607,9 +607,12 @@ async fn get_folders_list(State(state): State<Arc<AppState>>) -> impl IntoRespon
                 .iter()
                 .find(|item| item.folder_path == folder_path)
                 .map(|item| item.link_visibility.clone());
+            let link_visibility = explicit_visibility
+                .clone()
+                .unwrap_or_else(|| inherited_visibility.clone());
             serde_json::json!({
                 "folder_path": folder_path,
-                "link_visibility": explicit_visibility.unwrap_or_else(|| inherited_visibility.clone()),
+                "link_visibility": link_visibility,
                 "explicit_visibility": explicit_visibility,
                 "inherited_visibility": inherited_visibility,
             })
