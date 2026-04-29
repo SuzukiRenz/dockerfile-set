@@ -181,7 +181,10 @@ fn current_db_backup_path(state: &AppState) -> std::path::PathBuf {
 }
 
 fn copy_live_database_to_backup(state: &AppState) -> Result<std::path::PathBuf, crate::error::AppError> {
-    let source = state.db_pool.get().map_err(crate::error::AppError::from)?;
+    let source = state
+        .db_pool
+        .get()
+        .map_err(|e| crate::error::AppError::from(crate::error::AppErrorKind::from(e)))?;
     let backup_path = current_db_backup_path(state);
 
     if let Some(parent) = backup_path.parent() {
@@ -438,7 +441,10 @@ async fn import_database_backup(
         )
     })?;
 
-    let mut live_conn = state.db_pool.get().map_err(crate::error::AppError::from)?;
+    let mut live_conn = state
+        .db_pool
+        .get()
+        .map_err(|e| crate::error::AppError::from(crate::error::AppErrorKind::from(e)))?;
     live_conn
         .execute_batch("PRAGMA wal_checkpoint(FULL);")
         .map_err(|e| crate::error::AppError::new(
