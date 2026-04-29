@@ -16,7 +16,7 @@ tower-http = { version = "0.5", features = ["fs", "trace"] }
 tera = "1"
 
 # Database
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.31", features = ["bundled", "backup"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.24"
 
@@ -56,6 +56,7 @@ async-stream = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 bytes = "1"
 base64 = "0.22"
+flate2 = "1"
 
 # S3 compatible storage
 s3 = { package = "rust-s3", version = "0.34" }

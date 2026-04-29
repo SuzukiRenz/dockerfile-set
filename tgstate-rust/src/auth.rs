@@ -55,7 +55,7 @@ mod tests {
 
     #[test]
     fn password_only_api_request_without_session_is_rejected() {
-        let result = ensure_upload_auth(false, None, None, Some("hashed"), None);
+        let result = ensure_upload_auth(false, None, None, Some("hashed"), Some("session-token"), None);
         match result {
             Err((401, _, "login_required")) => {}
             other => panic!("expected login_required rejection, got {:?}", other),
@@ -64,14 +64,14 @@ mod tests {
 
     #[test]
     fn password_only_request_with_matching_session_is_allowed() {
-        let result = ensure_upload_auth(false, Some("hashed"), None, Some("hashed"), None);
+        let result = ensure_upload_auth(false, Some("session-token"), None, Some("hashed"), Some("session-token"), None);
         assert_eq!(result, Ok(()));
     }
 
     #[test]
     fn password_set_referer_only_request_is_rejected() {
         // Referer alone must not grant upload access when a password is configured.
-        let result = ensure_upload_auth(true, None, None, Some("hashed"), None);
+        let result = ensure_upload_auth(true, None, None, Some("hashed"), Some("session-token"), None);
         match result {
             Err((401, _, "login_required")) => {}
             other => panic!("expected login_required rejection, got {:?}", other),
@@ -81,7 +81,7 @@ mod tests {
     #[test]
     fn picgo_only_referer_only_request_is_rejected() {
         // Referer alone must not grant upload access when only a PicGo key is configured.
-        let result = ensure_upload_auth(true, None, Some("secret"), None, None);
+        let result = ensure_upload_auth(true, None, Some("secret"), None, None, None);
         match result {
             Err((401, _, "invalid_api_key")) => {}
             other => panic!("expected invalid_api_key rejection, got {:?}", other),
@@ -187,6 +187,7 @@ pub fn ensure_upload_auth(
     cookie_value: Option<&str>,
     picgo_api_key: Option<&str>,
     pass_word: Option<&str>,
+    session_token: Option<&str>,
     submitted_key: Option<&str>,
 ) -> Result<(), (u16, &'static str, &'static str)> {
     let has_picgo = picgo_api_key.map_or(false, |k| !k.is_empty());
@@ -207,10 +208,10 @@ pub fn ensure_upload_auth(
         return Err((401, "无效的 API 密钥", "invalid_api_key"));
     }
 
-    // Only PASS_WORD set: require matching session cookie.
+    // Only PASS_WORD set: require matching session cookie against the server-side session token.
     if !has_picgo && has_pwd {
-        if let Some(cookie) = cookie_value {
-            if secure_compare(cookie, pass_word.unwrap()) {
+        if let (Some(cookie), Some(token)) = (cookie_value, session_token) {
+            if !token.is_empty() && secure_compare(cookie, token) {
                 return Ok(());
             }
         }
@@ -218,8 +219,8 @@ pub fn ensure_upload_auth(
     }
 
     // Both set: accept either a valid session cookie OR a valid submitted key.
-    if let Some(cookie) = cookie_value {
-        if secure_compare(cookie, pass_word.unwrap()) {
+    if let (Some(cookie), Some(token)) = (cookie_value, session_token) {
+        if !token.is_empty() && secure_compare(cookie, token) {
             return Ok(());
         }
     }

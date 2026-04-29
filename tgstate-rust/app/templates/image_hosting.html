@@ -81,7 +81,7 @@
                 <div class="file-item image-card" style="border: 1px solid var(--border-color); border-radius: var(--radius-md); overflow: hidden; background: var(--bg-body);" id="file-item-{{ file.file_id | replace(from=':', to='-') }}" data-file-id="{{ file.file_id }}" data-file-url="/d/{{ file.display_id }}" data-filename="{{ file.filename }}" data-short-id="{{ file.short_id }}" data-folder-path="{{ file.folder_path }}" data-link-visibility="{{ file.link_visibility }}" data-filesize="{{ file.filesize }}" data-upload-date="{{ file.upload_date }}">
                     <div style="position: relative; aspect-ratio: 16/9; background: linear-gradient(135deg, rgba(99,102,241,0.12), rgba(59,130,246,0.08)); border-bottom: 1px solid var(--border-color);">
                         <button type="button" class="preview-image-btn" style="position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; color: var(--text-primary); cursor: pointer; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;">
-                            <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
+                            <span class="file-type-icon" data-filename="{{ file.filename }}" data-icon-size="34" style="display:flex; align-items:center; justify-content:center;"></span>
                             <span style="font-size: 13px; color: var(--text-secondary);">点击预览</span>
                         </button>
                         <div style="position: absolute; top: 8px; left: 8px; z-index: 1;">
@@ -122,5 +122,5 @@
     </div>
 </div>
 
-<script src="/static/js/main.js?v=4.4"></script>
+<script src="/static/js/main.js?v=4.5"></script>
 {% endblock %}

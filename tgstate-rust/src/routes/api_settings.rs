@@ -1,10 +1,16 @@
+use std::io::{Read, Write};
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::body::Body;
+use axum::extract::{Multipart, State};
+use axum::http::header;
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use serde::Deserialize;
 
 use crate::auth;
@@ -59,6 +65,7 @@ pub struct VerifyRequest {
     #[serde(rename = "CHANNEL_NAME")]
     channel_name: Option<String>,
 }
+
 
 fn validate_config(
     cfg: &std::collections::HashMap<String, Option<String>>,
@@ -169,6 +176,55 @@ fn is_https(headers: &HeaderMap) -> bool {
         .is_some_and(|v| v == "https")
 }
 
+fn current_db_backup_path(state: &AppState) -> std::path::PathBuf {
+    std::path::Path::new(&state.settings.data_dir).join("file_metadata.backup.db")
+}
+
+fn copy_live_database_to_backup(state: &AppState) -> Result<std::path::PathBuf, crate::error::AppError> {
+    let source = state.db_pool.get().map_err(crate::error::AppError::from)?;
+    let backup_path = current_db_backup_path(state);
+
+    if let Some(parent) = backup_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            crate::error::AppError::new(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("创建备份目录失败: {}", e),
+                "db_backup_prepare_failed",
+            )
+        })?;
+    }
+
+    if backup_path.exists() {
+        let _ = std::fs::remove_file(&backup_path);
+    }
+
+    let mut destination = rusqlite::Connection::open(&backup_path).map_err(|e| {
+        crate::error::AppError::new(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("打开备份数据库失败: {}", e),
+            "db_backup_open_failed",
+        )
+    })?;
+
+    let backup = rusqlite::backup::Backup::new(&source, &mut destination).map_err(|e| {
+        crate::error::AppError::new(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("创建数据库备份失败: {}", e),
+            "db_backup_start_failed",
+        )
+    })?;
+
+    backup.step(-1).map_err(|e| {
+        crate::error::AppError::new(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("执行数据库备份失败: {}", e),
+            "db_backup_step_failed",
+        )
+    })?;
+
+    Ok(backup_path)
+}
+
 async fn get_app_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let settings = config::get_app_settings(&state.settings, &state.db_pool);
     let bot = state.bot_state.lock().await;
@@ -259,6 +315,160 @@ async fn reset_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         [(axum::http::header::SET_COOKIE, crate::auth::build_clear_cookie())],
         Json(serde_json::json!({"status": "ok", "message": "配置已重置"})),
     )
+}
+
+async fn export_database_backup(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, crate::error::AppError> {
+    let backup_path = copy_live_database_to_backup(&state)?;
+    let db_bytes = std::fs::read(&backup_path).map_err(|e| {
+        crate::error::AppError::new(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("读取备份文件失败: {}", e),
+            "db_backup_read_failed",
+        )
+    })?;
+
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&db_bytes).map_err(|e| {
+        crate::error::AppError::new(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("压缩数据库失败: {}", e),
+            "db_backup_compress_failed",
+        )
+    })?;
+    let gzipped = encoder.finish().map_err(|e| {
+        crate::error::AppError::new(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("完成压缩失败: {}", e),
+            "db_backup_finish_failed",
+        )
+    })?;
+
+    let filename = format!(
+        "tgstate-db-backup-{}.db.gz",
+        chrono::Local::now().format("%Y%m%d-%H%M%S")
+    );
+
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/gzip".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", filename),
+            ),
+        ],
+        Body::from(gzipped),
+    ))
+}
+
+async fn import_database_backup(
+    State(state): State<Arc<AppState>>,
+    mut multipart: Multipart,
+) -> Result<impl IntoResponse, crate::error::AppError> {
+    let mut uploaded: Option<Vec<u8>> = None;
+    let mut confirm_overwrite = false;
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        match field.name() {
+            Some("confirm_overwrite") => {
+                let value = field.text().await.map_err(|e| {
+                    crate::error::AppError::new(
+                        axum::http::StatusCode::BAD_REQUEST,
+                        &format!("读取覆盖确认失败: {}", e),
+                        "db_restore_confirm_read_failed",
+                    )
+                })?;
+                confirm_overwrite = matches!(value.trim(), "1" | "true" | "yes" | "on");
+            }
+            Some("file") => {
+                uploaded = Some(field.bytes().await.map_err(|e| {
+                    crate::error::AppError::new(
+                        axum::http::StatusCode::BAD_REQUEST,
+                        &format!("读取上传文件失败: {}", e),
+                        "db_restore_upload_read_failed",
+                    )
+                })?.to_vec());
+            }
+            _ => {}
+        }
+    }
+
+    if !confirm_overwrite {
+        return Err(crate::error::AppError::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "需要确认覆盖后才能导入数据库",
+            "confirm_overwrite_required",
+        ));
+    }
+
+    let file_bytes = uploaded.ok_or_else(|| {
+        crate::error::AppError::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "未找到要导入的备份文件",
+            "db_restore_file_missing",
+        )
+    })?;
+
+    let mut decoder = GzDecoder::new(file_bytes.as_slice());
+    let mut restored_db = Vec::new();
+    decoder.read_to_end(&mut restored_db).map_err(|e| {
+        crate::error::AppError::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            &format!("解压备份文件失败: {}", e),
+            "db_restore_decompress_failed",
+        )
+    })?;
+
+    let temp_restore_path = std::path::Path::new(&state.settings.data_dir).join("file_metadata.restore.tmp.db");
+    std::fs::write(&temp_restore_path, &restored_db).map_err(|e| {
+        crate::error::AppError::new(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("写入临时恢复数据库失败: {}", e),
+            "db_restore_temp_write_failed",
+        )
+    })?;
+
+    let source = rusqlite::Connection::open(&temp_restore_path).map_err(|e| {
+        let _ = std::fs::remove_file(&temp_restore_path);
+        crate::error::AppError::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            &format!("备份文件不是有效的 SQLite 数据库: {}", e),
+            "db_restore_invalid_sqlite",
+        )
+    })?;
+
+    let mut live_conn = state.db_pool.get().map_err(crate::error::AppError::from)?;
+    live_conn
+        .execute_batch("PRAGMA wal_checkpoint(FULL);")
+        .map_err(|e| crate::error::AppError::new(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("恢复前检查点失败: {}", e),
+            "db_restore_checkpoint_failed",
+        ))?;
+
+    let backup = rusqlite::backup::Backup::new(&source, &mut live_conn).map_err(|e| {
+        crate::error::AppError::new(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("创建恢复任务失败: {}", e),
+            "db_restore_start_failed",
+        )
+    })?;
+    backup.step(-1).map_err(|e| {
+        crate::error::AppError::new(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("覆盖数据库失败: {}", e),
+            "db_restore_replace_failed",
+        )
+    })?;
+
+    let _ = std::fs::remove_file(&temp_restore_path);
+    let _ = state::apply_runtime_settings(state.clone(), true).await;
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "message": "数据库已覆盖导入，建议刷新页面确认配置与文件状态"
+    })))
 }
 
 async fn set_password(
@@ -373,6 +583,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/app-config", get(get_app_config))
         .route("/api/app-config/save", post(save_config_only))
         .route("/api/app-config/apply", post(save_and_apply))
+        .route("/api/app-config/db/export", get(export_database_backup))
+        .route("/api/app-config/db/import", post(import_database_backup))
         .route("/api/reset-config", post(reset_config))
         .route("/api/set-password", post(set_password))
         .route("/api/verify/bot", post(verify_bot))

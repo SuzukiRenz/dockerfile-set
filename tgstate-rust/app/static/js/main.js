@@ -98,6 +98,59 @@ document.addEventListener('DOMContentLoaded', () => {
         return parts.join('/');
     }
 
+    function getFileExtension(filename) {
+        const name = String(filename || '').trim().toLowerCase();
+        const idx = name.lastIndexOf('.');
+        if (idx <= 0 || idx === name.length - 1) return '';
+        return name.slice(idx + 1);
+    }
+
+    function getFileCategory(filename) {
+        const ext = getFileExtension(filename);
+        const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'avif', 'heic'];
+        const videoExts = ['mp4', 'mkv', 'mov', 'avi', 'webm', 'm4v', 'flv'];
+        const archiveExts = ['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz', 'tgz'];
+        const codeExts = ['js', 'ts', 'tsx', 'jsx', 'rs', 'py', 'go', 'java', 'c', 'cpp', 'h', 'hpp', 'cs', 'php', 'rb', 'swift', 'kt', 'json', 'yaml', 'yml', 'toml', 'xml', 'html', 'css', 'scss', 'sql', 'sh', 'bat', 'ps1', 'md'];
+
+        if (imageExts.includes(ext)) return 'image';
+        if (videoExts.includes(ext)) return 'video';
+        if (archiveExts.includes(ext)) return 'archive';
+        if (codeExts.includes(ext)) return 'code';
+        return 'default';
+    }
+
+    function getFileIconSvg(filename, size = 20) {
+        const category = getFileCategory(filename);
+        const styles = {
+            image: 'color:#10b981;',
+            video: 'color:#8b5cf6;',
+            archive: 'color:#f59e0b;',
+            code: 'color:#3b82f6;',
+            default: 'color:var(--primary-color);',
+        };
+        const style = styles[category] || styles.default;
+
+        if (category === 'image') {
+            return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="${style}"><rect x="3" y="3" width="18" height="18" rx="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>`;
+        }
+        if (category === 'video') {
+            return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="${style}"><rect x="2" y="6" width="15" height="12" rx="2"></rect><polygon points="17 10 22 7 22 17 17 14 17 10"></polygon></svg>`;
+        }
+        if (category === 'archive') {
+            return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="${style}"><path d="M21 8v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8"></path><path d="M1 8h22"></path><path d="M10 12h4"></path><path d="M10 16h4"></path><path d="M9 4h6l1 4H8l1-4z"></path></svg>`;
+        }
+        if (category === 'code') {
+            return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="${style}"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>`;
+        }
+        return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="${style}"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>`;
+    }
+
+    function hydrateFileIcons(root = document) {
+        root.querySelectorAll('.file-type-icon[data-filename]').forEach(node => {
+            node.innerHTML = getFileIconSvg(node.dataset.filename || '', Number(node.dataset.iconSize || 20));
+        });
+    }
+
     let folderSettingsMap = new Map();
 
     function getFolderEntries() {
@@ -195,7 +248,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const filename = item.dataset.filename || 'file';
             cards.push(`
                 <button type="button" class="btn btn-ghost folder-file-card" data-file-id="${fileId}" style="height: auto; min-height: 92px; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 8px; padding: 14px; border: 1px solid var(--border-color);">
-                    <span style="font-size: 24px;">📄</span>
+                    <span class="file-type-icon" data-filename="${filename}" data-icon-size="24" style="display:flex; align-items:center; justify-content:center; min-height:24px;"></span>
                     <span style="font-size: 13px; font-weight: 600; text-align: left; word-break: break-all;">${filename}</span>
                 </button>
             `);
@@ -206,6 +259,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         currentFolderGrid.innerHTML = cards.join('');
+        hydrateFileIcons(currentFolderGrid);
     }
 
     function renderFolderTableVisibility() {
@@ -884,14 +938,19 @@ document.addEventListener('DOMContentLoaded', () => {
         const folderPath = file.folder_path || '';
 
         let html = '';
+        const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'avif', 'heic'];
+        const isImageFile = imageExts.includes(getFileExtension(file.filename));
         if (isGridView) {
              html = `
                 <div class="file-item image-card" style="border: 1px solid var(--border-color); border-radius: var(--radius-md); overflow: hidden; background: var(--bg-body);" id="file-item-${safeId}" data-file-id="${file.file_id}" data-file-url="${fileUrl}" data-filename="${file.filename}" data-short-id="${file.short_id || ''}" data-folder-path="${folderPath}" data-link-visibility="${file.link_visibility || 'public'}" data-filesize="${file.filesize || 0}" data-upload-date="${file.upload_date || ''}">
                     <div style="position: relative; aspect-ratio: 16/9; background: linear-gradient(135deg, rgba(99,102,241,0.12), rgba(59,130,246,0.08)); border-bottom: 1px solid var(--border-color);">
-                        <button type="button" class="preview-image-btn" style="position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; color: var(--text-primary); cursor: pointer; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;">
+                        ${isImageFile ? `<button type="button" class="preview-image-btn" style="position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; color: var(--text-primary); cursor: pointer; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;">
                             <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
                             <span style="font-size: 13px; color: var(--text-secondary);">点击预览</span>
-                        </button>
+                        </button>` : `<div style="position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--text-primary);">
+                            <span class="file-type-icon" data-filename="${file.filename}" data-icon-size="34" style="display:flex; align-items:center; justify-content:center;"></span>
+                            <span style="font-size: 13px; color: var(--text-secondary);">${getFileCategory(file.filename) === 'video' ? '视频文件' : getFileCategory(file.filename) === 'archive' ? '压缩文件' : getFileCategory(file.filename) === 'code' ? '代码文件' : '文件预览不可用'}</span>
+                        </div>`}
                         <div style="position: absolute; top: 8px; left: 8px; z-index: 1;">
                             <input type="checkbox" class="file-checkbox" data-file-id="${file.file_id}" style="width: 16px; height: 16px; cursor: pointer;">
                         </div>
@@ -915,7 +974,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     <td style="padding: 12px 16px;"><input type="checkbox" class="file-checkbox" data-file-id="${file.file_id}"></td>
                     <td style="padding: 12px 16px;">
                         <div style="display: flex; align-items: center; gap: 8px;">
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--primary-color);"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>
+                            <span class="file-type-icon" data-filename="${file.filename}" data-icon-size="20" style="display:flex; align-items:center; justify-content:center; min-width:20px;"></span>
                             <div style="display: flex; flex-direction: column; gap: 2px; min-width: 0;">
                                 <span class="text-sm font-medium" style="color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${file.filename}</span>
                                 <span class="text-sm text-muted folder-path-text">${folderPath}</span>
@@ -942,10 +1001,12 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         container.insertAdjacentHTML('afterbegin', html);
+        hydrateFileIcons(container);
         sortImageCards();
         renderFolderView();
     }
 
+    hydrateFileIcons(document);
     loadFolderSettings();
     sortImageCards();
     renderFolderView();

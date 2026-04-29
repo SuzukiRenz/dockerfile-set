@@ -250,13 +250,24 @@ pub fn add_file_metadata(
     file_id: &str,
     filesize: i64,
 ) -> Result<String, AppErrorKind> {
-    add_file_metadata_with_storage(
+    add_file_metadata_in_folder(pool, filename, file_id, filesize, "")
+}
+
+pub fn add_file_metadata_in_folder(
+    pool: &DbPool,
+    filename: &str,
+    file_id: &str,
+    filesize: i64,
+    folder_path: &str,
+) -> Result<String, AppErrorKind> {
+    add_file_metadata_with_storage_in_folder(
         pool,
         filename,
         file_id,
         filesize,
         constants::STORAGE_BACKEND_TELEGRAM,
         None,
+        folder_path,
     )
 }
 
@@ -268,13 +279,34 @@ pub fn add_file_metadata_with_storage(
     storage_backend: &str,
     storage_path: Option<&str>,
 ) -> Result<String, AppErrorKind> {
+    add_file_metadata_with_storage_in_folder(
+        pool,
+        filename,
+        file_id,
+        filesize,
+        storage_backend,
+        storage_path,
+        "",
+    )
+}
+
+pub fn add_file_metadata_with_storage_in_folder(
+    pool: &DbPool,
+    filename: &str,
+    file_id: &str,
+    filesize: i64,
+    storage_backend: &str,
+    storage_path: Option<&str>,
+    folder_path: &str,
+) -> Result<String, AppErrorKind> {
     let conn = pool.get()?;
+    let normalized_folder_path = normalize_folder_path(folder_path);
 
     for _ in 0..5 {
         let short_id = generate_short_id(constants::SHORT_ID_LENGTH);
         match conn.execute(
-            "INSERT INTO files (filename, file_id, filesize, short_id, storage_backend, storage_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![filename, file_id, filesize, short_id, storage_backend, storage_path],
+            "INSERT INTO files (filename, file_id, filesize, short_id, storage_backend, storage_path, folder_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![filename, file_id, filesize, short_id, storage_backend, storage_path, normalized_folder_path],
         ) {
             Ok(_) => {
                 let short_id_preview = short_id.chars().take(2).collect::<String>();

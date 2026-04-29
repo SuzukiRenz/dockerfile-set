@@ -273,11 +273,24 @@ fn get_telegram_service(state: &AppState) -> Result<TelegramService, Response> {
 }
 
 async fn put_file(state: Arc<AppState>, identifier: String, body: Body) -> Response {
-    let filename = api_upload::sanitize_filename(&identifier);
+    let normalized_path = database::normalize_folder_path(&identifier);
+    let path_parts = split_webdav_path(&normalized_path);
+    let Some(raw_filename) = path_parts.last() else {
+        return http_error(StatusCode::BAD_REQUEST, "invalid filename", "invalid_filename")
+            .into_response();
+    };
+
+    let filename = api_upload::sanitize_filename(raw_filename);
     if filename.is_empty() {
         return http_error(StatusCode::BAD_REQUEST, "invalid filename", "invalid_filename")
             .into_response();
     }
+
+    let folder_path = if path_parts.len() > 1 {
+        path_parts[..path_parts.len() - 1].join("/")
+    } else {
+        String::new()
+    };
 
     let bytes = match to_bytes(body, constants::MAX_UPLOAD_BODY_SIZE).await {
         Ok(bytes) => bytes,
@@ -295,14 +308,27 @@ async fn put_file(state: Arc<AppState>, identifier: String, body: Body) -> Respo
         .unwrap_or(constants::STORAGE_BACKEND_TELEGRAM);
 
     let upload_result = if backend == constants::STORAGE_BACKEND_S3 {
-        storage::s3::upload_bytes(&state, &filename, bytes.to_vec(), bytes.len() as i64).await
+        storage::s3::upload_bytes_in_folder(
+            &state,
+            &filename,
+            bytes.to_vec(),
+            bytes.len() as i64,
+            &folder_path,
+        )
+        .await
     } else {
         let tg_service = match get_telegram_service(&state) {
             Ok(service) => service,
             Err(resp) => return resp,
         };
-        api_upload::upload_bytes_to_telegram(&tg_service, &filename, bytes.to_vec(), &state.db_pool)
-            .await
+        api_upload::upload_bytes_to_telegram(
+            &tg_service,
+            &filename,
+            bytes.to_vec(),
+            &state.db_pool,
+            &folder_path,
+        )
+        .await
     };
 
     match upload_result {

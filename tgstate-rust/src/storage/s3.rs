@@ -98,6 +98,16 @@ pub async fn upload_bytes(
     data: Vec<u8>,
     size: i64,
 ) -> Result<String, String> {
+    upload_bytes_in_folder(state, filename, data, size, "").await
+}
+
+pub async fn upload_bytes_in_folder(
+    state: &Arc<AppState>,
+    filename: &str,
+    data: Vec<u8>,
+    size: i64,
+    folder_path: &str,
+) -> Result<String, String> {
     let cfg = app_cfg(state);
 
     let endpoint = cfg
@@ -149,18 +159,20 @@ pub async fn upload_bytes(
         .await
         .map_err(|e| format!("S3 upload failed: {}", e))?;
 
-    database::add_file_metadata_with_storage(
+    let short_id = database::add_file_metadata_with_storage_in_folder(
         &state.db_pool,
         filename,
         &file_id,
         size,
         constants::STORAGE_BACKEND_S3,
         Some(&object_key),
+        folder_path,
     )
     .map_err(|e| e.to_string())?;
 
+
     tracing::info!("S3 upload success: {}", object_key);
-    Ok(file_id)
+    Ok(short_id)
 }
 
 pub async fn get_download_url(

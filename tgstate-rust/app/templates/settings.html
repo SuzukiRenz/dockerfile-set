@@ -113,9 +113,24 @@
                     <button type="button" class="btn btn-secondary btn-sm" onclick="testBot()" id="btn-test-bot">测试 Bot Token</button>
                     <button type="button" class="btn btn-secondary btn-sm" onclick="testChannel()" id="btn-test-ch">测试频道</button>
                 </div>
-                <div style="border-top: 1px solid var(--border-color); padding-top: 20px; margin-top: 20px;">
-                    <h3 style="font-size: 14px; font-weight: 700; color: var(--danger-color); margin-bottom: 12px;">危险区域</h3>
-                    <button type="button" class="btn" style="color: var(--danger-color); border: 1px solid var(--danger-color);" onclick="resetConfig()">重置所有配置</button>
+                <div style="border-top: 1px solid var(--border-color); padding-top: 20px; margin-top: 20px; display: flex; flex-direction: column; gap: 18px;">
+                    <div>
+                        <h3 style="font-size: 14px; font-weight: 700; margin-bottom: 12px;">数据库备份</h3>
+                        <div class="text-sm text-muted" style="margin-bottom: 12px;">导出当前 SQLite 数据库的压缩备份文件（.db.gz）。</div>
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="exportDbBackup()" id="btn-db-export">下载数据库备份</button>
+                    </div>
+                    <div style="border-top: 1px dashed var(--border-color); padding-top: 18px;">
+                        <h3 style="font-size: 14px; font-weight: 700; margin-bottom: 12px;">数据库覆盖导入</h3>
+                        <div class="text-sm text-muted" style="margin-bottom: 12px;">上传之前导出的 .db.gz 文件并覆盖当前数据库。导入后会立即生效。</div>
+                        <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center;">
+                            <input type="file" id="db-backup-file" accept=".gz,.db.gz,application/gzip" class="input-field" style="max-width: 320px; padding: 8px;">
+                            <button type="button" class="btn btn-secondary btn-sm" onclick="importDbBackup()" id="btn-db-import">导入并覆盖</button>
+                        </div>
+                    </div>
+                    <div style="border-top: 1px solid var(--border-color); padding-top: 20px;">
+                        <h3 style="font-size: 14px; font-weight: 700; color: var(--danger-color); margin-bottom: 12px;">危险区域</h3>
+                        <button type="button" class="btn" style="color: var(--danger-color); border: 1px solid var(--danger-color);" onclick="resetConfig()">重置所有配置</button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -270,6 +285,70 @@ async function testChannel() {
     } catch (e) {
         Toast.show('请求失败', 'error');
     } finally { Utils.setLoading(btn, false); }
+}
+
+async function exportDbBackup() {
+    const btn = document.getElementById('btn-db-export');
+    Utils.setLoading(btn, true);
+    try {
+        const res = await fetch('/api/app-config/db/export');
+        if (!res.ok) {
+            const json = await res.json().catch(() => null);
+            Toast.show(json?.detail?.message || '导出失败', 'error');
+            return;
+        }
+        const blob = await res.blob();
+        const filename = res.headers.get('Content-Disposition')?.match(/filename="([^"]+)"/)?.[1] || 'tgstate-db-backup.db.gz';
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        Toast.show('数据库备份已开始下载');
+    } catch (e) {
+        Toast.show('导出失败', 'error');
+    } finally {
+        Utils.setLoading(btn, false);
+    }
+}
+
+async function importDbBackup() {
+    const input = document.getElementById('db-backup-file');
+    const btn = document.getElementById('btn-db-import');
+    const file = input?.files?.[0];
+    if (!file) {
+        Toast.show('请先选择备份文件', 'error');
+        return;
+    }
+
+    const confirmed = await Modal.confirm('覆盖导入数据库', '确定要用所选备份覆盖当前数据库吗？此操作会立即替换现有数据，无法撤销。');
+    if (!confirmed) return;
+
+    Utils.setLoading(btn, true);
+    try {
+        const form = new FormData();
+        form.append('file', file);
+        form.append('confirm_overwrite', '1');
+
+        const res = await fetch('/api/app-config/db/import', {
+            method: 'POST',
+            body: form,
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok) {
+            Toast.show(json?.detail?.message || '导入失败', 'error');
+            return;
+        }
+        Toast.show(json?.message || '数据库已覆盖导入');
+        setTimeout(() => window.location.reload(), 1200);
+    } catch (e) {
+        Toast.show('导入失败', 'error');
+    } finally {
+        Utils.setLoading(btn, false);
+    }
 }
 
 async function resetConfig() {

@@ -145,6 +145,7 @@ async fn upload_file(
             None,
             picgo_key,
             pass_word_hash_ref,
+            session_token_owned.as_deref(),
             header_key.as_deref(),
         )
         .is_ok();
@@ -175,6 +176,7 @@ async fn upload_file(
                     None,
                     picgo_key,
                     pass_word_hash_ref,
+                    session_token_owned.as_deref(),
                     key_text.as_deref(),
                 ) {
                     return Err(http_error(axum::http::StatusCode::UNAUTHORIZED, msg, code));
@@ -228,6 +230,7 @@ async fn upload_file(
                     field,
                     &filename,
                     &state.db_pool,
+                    "",
                 )
                 .await
             });
@@ -241,6 +244,7 @@ async fn upload_file(
             None,
             picgo_key,
             pass_word_hash_ref,
+            session_token_owned.as_deref(),
             final_key,
         ) {
             return Err(http_error(axum::http::StatusCode::UNAUTHORIZED, msg, code));
@@ -291,6 +295,7 @@ async fn stream_upload_to_telegram(
     mut field: axum::extract::multipart::Field<'_>,
     filename: &str,
     db_pool: &database::DbPool,
+    folder_path: &str,
 ) -> Result<String, String> {
     let chunk_size = constants::TELEGRAM_CHUNK_SIZE;
     let mut buffer = BytesMut::with_capacity(chunk_size);
@@ -331,11 +336,12 @@ async fn stream_upload_to_telegram(
 
         let (composite_id, telegram_size) = extract_uploaded_media(message, filename)?;
 
-        let short_id = database::add_file_metadata(
+        let short_id = database::add_file_metadata_in_folder(
             db_pool,
             filename,
             &composite_id,
             if telegram_size > 0 { telegram_size } else { total_size as i64 },
+            folder_path,
         )
             .map_err(|e| e.to_string())?;
         return Ok(short_id);
@@ -369,8 +375,14 @@ async fn stream_upload_to_telegram(
 
     let (manifest_composite, _) = extract_uploaded_media(message, &manifest_name)?;
 
-    let short_id = database::add_file_metadata(db_pool, filename, &manifest_composite, total_size as i64)
-        .map_err(|e| e.to_string())?;
+    let short_id = database::add_file_metadata_in_folder(
+        db_pool,
+        filename,
+        &manifest_composite,
+        total_size as i64,
+        folder_path,
+    )
+    .map_err(|e| e.to_string())?;
     Ok(short_id)
 }
 
@@ -379,6 +391,7 @@ pub(crate) async fn upload_bytes_to_telegram(
     filename: &str,
     data: Vec<u8>,
     db_pool: &database::DbPool,
+    folder_path: &str,
 ) -> Result<String, String> {
     if data.is_empty() {
         return Err("empty file".into());
@@ -389,11 +402,12 @@ pub(crate) async fn upload_bytes_to_telegram(
         let total_size = data.len() as i64;
         let message = tg_service.send_document_raw(data, filename, None).await?;
         let (composite_id, telegram_size) = extract_uploaded_media(message, filename)?;
-        return database::add_file_metadata(
+        return database::add_file_metadata_in_folder(
             db_pool,
             filename,
             &composite_id,
             if telegram_size > 0 { telegram_size } else { total_size },
+            folder_path,
         )
             .map_err(|e| e.to_string());
     }
@@ -430,8 +444,14 @@ pub(crate) async fn upload_bytes_to_telegram(
 
     let (manifest_composite, _) = extract_uploaded_media(message, &manifest_name)?;
 
-    database::add_file_metadata(db_pool, filename, &manifest_composite, data.len() as i64)
-        .map_err(|e| e.to_string())
+    database::add_file_metadata_in_folder(
+        db_pool,
+        filename,
+        &manifest_composite,
+        data.len() as i64,
+        folder_path,
+    )
+    .map_err(|e| e.to_string())
 }
 
 pub fn router() -> Router<Arc<AppState>> {
