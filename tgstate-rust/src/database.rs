@@ -290,6 +290,53 @@ pub fn add_file_metadata_with_storage(
     )
 }
 
+fn inherited_folder_visibility_from_conn(
+    conn: &rusqlite::Connection,
+    folder_path: &str,
+) -> String {
+    let normalized = normalize_folder_path(folder_path);
+    if normalized.is_empty() {
+        return "public".to_string();
+    }
+
+    let exact: Option<String> = conn
+        .query_row(
+            "SELECT link_visibility FROM folder_settings WHERE folder_path = ?1",
+            params![normalized],
+            |row| row.get(0),
+        )
+        .ok();
+
+    if let Some(value) = exact {
+        return if value == "private" {
+            "private".to_string()
+        } else {
+            "public".to_string()
+        };
+    }
+
+    let mut current = normalized.as_str();
+    while let Some((parent, _)) = current.rsplit_once('/') {
+        let inherited: Option<String> = conn
+            .query_row(
+                "SELECT link_visibility FROM folder_settings WHERE folder_path = ?1",
+                params![parent],
+                |row| row.get(0),
+            )
+            .ok();
+        if let Some(value) = inherited {
+            return if value == "private" {
+                "private".to_string()
+            } else {
+                "public".to_string()
+            };
+        }
+        current = parent;
+    }
+
+    "public".to_string()
+}
+
 pub fn add_file_metadata_with_storage_in_folder(
     pool: &DbPool,
     filename: &str,
@@ -301,12 +348,13 @@ pub fn add_file_metadata_with_storage_in_folder(
 ) -> Result<String, AppErrorKind> {
     let conn = pool.get()?;
     let normalized_folder_path = normalize_folder_path(folder_path);
+    let inherited_visibility = inherited_folder_visibility_from_conn(&conn, &normalized_folder_path);
 
     for _ in 0..5 {
         let short_id = generate_short_id(constants::SHORT_ID_LENGTH);
         match conn.execute(
-            "INSERT INTO files (filename, file_id, filesize, short_id, storage_backend, storage_path, folder_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![filename, file_id, filesize, short_id, storage_backend, storage_path, normalized_folder_path],
+            "INSERT INTO files (filename, file_id, filesize, short_id, storage_backend, storage_path, folder_path, link_visibility) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![filename, file_id, filesize, short_id, storage_backend, storage_path, normalized_folder_path, inherited_visibility],
         ) {
             Ok(_) => {
                 let short_id_preview = short_id.chars().take(2).collect::<String>();
@@ -585,40 +633,8 @@ pub fn list_folder_settings(pool: &DbPool) -> Result<Vec<FolderSetting>, AppErro
 }
 
 pub fn get_folder_visibility(pool: &DbPool, folder_path: &str) -> Result<String, AppErrorKind> {
-    let normalized = normalize_folder_path(folder_path);
-    if normalized.is_empty() {
-        return Ok("public".to_string());
-    }
-
     let conn = pool.get()?;
-    let exact: Option<String> = conn
-        .query_row(
-            "SELECT link_visibility FROM folder_settings WHERE folder_path = ?1",
-            params![normalized],
-            |row| row.get(0),
-        )
-        .ok();
-
-    if let Some(value) = exact {
-        return Ok(if value == "private" { "private".to_string() } else { "public".to_string() });
-    }
-
-    let mut current = normalized.as_str();
-    while let Some((parent, _)) = current.rsplit_once('/') {
-        let inherited: Option<String> = conn
-            .query_row(
-                "SELECT link_visibility FROM folder_settings WHERE folder_path = ?1",
-                params![parent],
-                |row| row.get(0),
-            )
-            .ok();
-        if let Some(value) = inherited {
-            return Ok(if value == "private" { "private".to_string() } else { "public".to_string() });
-        }
-        current = parent;
-    }
-
-    Ok("public".to_string())
+    Ok(inherited_folder_visibility_from_conn(&conn, folder_path))
 }
 
 pub fn get_file_by_webdav_path(

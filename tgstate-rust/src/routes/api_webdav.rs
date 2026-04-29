@@ -292,15 +292,6 @@ async fn put_file(state: Arc<AppState>, identifier: String, body: Body) -> Respo
         String::new()
     };
 
-    let bytes = match to_bytes(body, constants::MAX_UPLOAD_BODY_SIZE).await {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            tracing::error!("WebDAV body read failed: {}", e);
-            return http_error(StatusCode::BAD_REQUEST, "invalid upload body", "invalid_body")
-                .into_response();
-        }
-    };
-
     let app_settings = config::get_app_settings(&state.settings, &state.db_pool);
     let backend = app_settings
         .get("STORAGE_BACKEND")
@@ -308,6 +299,15 @@ async fn put_file(state: Arc<AppState>, identifier: String, body: Body) -> Respo
         .unwrap_or(constants::STORAGE_BACKEND_TELEGRAM);
 
     let upload_result = if backend == constants::STORAGE_BACKEND_S3 {
+        let bytes = match to_bytes(body, constants::MAX_UPLOAD_BODY_SIZE).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::error!("WebDAV body read failed: {}", e);
+                return http_error(StatusCode::BAD_REQUEST, "invalid upload body", "invalid_body")
+                    .into_response();
+            }
+        };
+
         storage::s3::upload_bytes_in_folder(
             &state,
             &filename,
@@ -321,12 +321,13 @@ async fn put_file(state: Arc<AppState>, identifier: String, body: Body) -> Respo
             Ok(service) => service,
             Err(resp) => return resp,
         };
-        api_upload::upload_bytes_to_telegram(
+        api_upload::upload_body_to_telegram(
             &tg_service,
+            body,
             &filename,
-            bytes.to_vec(),
             &state.db_pool,
             &folder_path,
+            constants::MAX_UPLOAD_BODY_SIZE,
         )
         .await
     };

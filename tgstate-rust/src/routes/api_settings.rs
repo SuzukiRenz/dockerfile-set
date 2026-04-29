@@ -433,7 +433,11 @@ async fn import_database_backup(
     })?;
 
     {
-        let source = rusqlite::Connection::open(&temp_restore_path).map_err(|e| {
+        let source = rusqlite::Connection::open_with_flags(
+            &temp_restore_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(|e| {
             let _ = std::fs::remove_file(&temp_restore_path);
             crate::error::AppError::new(
                 axum::http::StatusCode::BAD_REQUEST,
@@ -442,32 +446,53 @@ async fn import_database_backup(
             )
         })?;
 
+        source
+            .query_row("PRAGMA integrity_check(1)", [], |row| row.get::<_, String>(0))
+            .map_err(|e| {
+                crate::error::AppError::new(
+                    axum::http::StatusCode::BAD_REQUEST,
+                    &format!("备份数据库完整性检查失败: {}", e),
+                    "db_restore_integrity_check_failed",
+                )
+            })
+            .and_then(|value| {
+                if value.eq_ignore_ascii_case("ok") {
+                    Ok(())
+                } else {
+                    Err(crate::error::AppError::new(
+                        axum::http::StatusCode::BAD_REQUEST,
+                        &format!("备份数据库完整性检查未通过: {}", value),
+                        "db_restore_integrity_check_failed",
+                    ))
+                }
+            })?;
+
+        drop(source);
+
         let mut live_conn = state
             .db_pool
             .get()
             .map_err(|e| crate::error::AppError::from(crate::error::AppErrorKind::from(e)))?;
         live_conn
-            .execute_batch("PRAGMA wal_checkpoint(FULL);")
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
             .map_err(|e| crate::error::AppError::new(
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 &format!("恢复前检查点失败: {}", e),
                 "db_restore_checkpoint_failed",
             ))?;
-
-        let backup = rusqlite::backup::Backup::new(&source, &mut live_conn).map_err(|e| {
-            crate::error::AppError::new(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("创建恢复任务失败: {}", e),
-                "db_restore_start_failed",
+        live_conn
+            .restore(
+                rusqlite::DatabaseName::Main,
+                &temp_restore_path,
+                None::<fn(rusqlite::backup::Progress)>,
             )
-        })?;
-        backup.step(-1).map_err(|e| {
-            crate::error::AppError::new(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("覆盖数据库失败: {}", e),
-                "db_restore_replace_failed",
-            )
-        })?;
+            .map_err(|e| {
+                crate::error::AppError::new(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("覆盖数据库失败: {}", e),
+                    "db_restore_replace_failed",
+                )
+            })?;
     }
 
     let _ = std::fs::remove_file(&temp_restore_path);

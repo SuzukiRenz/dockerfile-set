@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
+use axum::body::Body;
 use axum::extract::{Multipart, State};
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
+use futures::StreamExt;
 
 use crate::auth::{self, COOKIE_NAME};
 use crate::config;
@@ -397,33 +399,111 @@ pub(crate) async fn upload_bytes_to_telegram(
         return Err("empty file".into());
     }
 
+    upload_stream_to_telegram(
+        tg_service,
+        futures::stream::iter(vec![Ok(Bytes::from(data))]),
+        filename,
+        db_pool,
+        folder_path,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn upload_body_to_telegram(
+    tg_service: &TelegramService,
+    body: Body,
+    filename: &str,
+    db_pool: &database::DbPool,
+    folder_path: &str,
+    max_bytes: usize,
+) -> Result<String, String> {
+    let stream = body.into_data_stream().map(move |result| {
+        result.map_err(|e| {
+            if e.is_body_too_large() {
+                format!("body exceeds {} bytes", max_bytes)
+            } else {
+                e.to_string()
+            }
+        })
+    });
+
+    upload_stream_to_telegram(tg_service, stream, filename, db_pool, folder_path, Some(max_bytes)).await
+}
+
+async fn upload_stream_to_telegram<S, E>(
+    tg_service: &TelegramService,
+    mut stream: S,
+    filename: &str,
+    db_pool: &database::DbPool,
+    folder_path: &str,
+    max_bytes: Option<usize>,
+) -> Result<String, String>
+where
+    S: futures::Stream<Item = Result<Bytes, E>> + Unpin,
+    E: ToString,
+{
     let chunk_size = constants::TELEGRAM_CHUNK_SIZE;
-    if data.len() <= chunk_size {
-        let total_size = data.len() as i64;
+    let mut buffer = BytesMut::with_capacity(chunk_size);
+    let mut total_size: usize = 0;
+    let mut chunk_ids: Vec<String> = Vec::new();
+    let mut first_message_id: Option<i64> = None;
+    let mut chunk_num: u32 = 0;
+
+    while let Some(next_chunk) = stream.next().await {
+        let bytes = next_chunk.map_err(|e| e.to_string())?;
+        total_size += bytes.len();
+        if let Some(limit) = max_bytes {
+            if total_size > limit {
+                return Err(format!("body exceeds {} bytes", limit));
+            }
+        }
+        buffer.extend_from_slice(&bytes);
+
+        while buffer.len() >= chunk_size {
+            chunk_num += 1;
+            let chunk_data = buffer.split_to(chunk_size).freeze().to_vec();
+            let chunk_name = format!("{}.part{}", filename, chunk_num);
+
+            let message = tg_service
+                .send_document_raw(chunk_data, &chunk_name, first_message_id)
+                .await?;
+
+            if first_message_id.is_none() {
+                first_message_id = Some(message.message_id);
+            }
+
+            let (composite_id, _) = extract_uploaded_media(message, &chunk_name)?;
+            chunk_ids.push(composite_id);
+        }
+    }
+
+    if buffer.is_empty() && chunk_ids.is_empty() {
+        return Err("empty file".into());
+    }
+
+    if chunk_ids.is_empty() {
+        let data = buffer.freeze().to_vec();
         let message = tg_service.send_document_raw(data, filename, None).await?;
         let (composite_id, telegram_size) = extract_uploaded_media(message, filename)?;
         return database::add_file_metadata_in_folder(
             db_pool,
             filename,
             &composite_id,
-            if telegram_size > 0 { telegram_size } else { total_size },
+            if telegram_size > 0 { telegram_size } else { total_size as i64 },
             folder_path,
         )
-            .map_err(|e| e.to_string());
+        .map_err(|e| e.to_string());
     }
 
-    let mut chunk_ids = Vec::new();
-    let mut first_message_id: Option<i64> = None;
+    if !buffer.is_empty() {
+        chunk_num += 1;
+        let chunk_data = buffer.freeze().to_vec();
+        let chunk_name = format!("{}.part{}", filename, chunk_num);
 
-    for (idx, chunk) in data.chunks(chunk_size).enumerate() {
-        let chunk_name = format!("{}.part{}", filename, idx + 1);
         let message = tg_service
-            .send_document_raw(chunk.to_vec(), &chunk_name, first_message_id)
+            .send_document_raw(chunk_data, &chunk_name, first_message_id)
             .await?;
-
-        if first_message_id.is_none() {
-            first_message_id = Some(message.message_id);
-        }
 
         let (composite_id, _) = extract_uploaded_media(message, &chunk_name)?;
         chunk_ids.push(composite_id);
@@ -448,7 +528,7 @@ pub(crate) async fn upload_bytes_to_telegram(
         db_pool,
         filename,
         &manifest_composite,
-        data.len() as i64,
+        total_size as i64,
         folder_path,
     )
     .map_err(|e| e.to_string())
