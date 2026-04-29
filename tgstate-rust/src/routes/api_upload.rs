@@ -401,7 +401,7 @@ pub(crate) async fn upload_bytes_to_telegram(
 
     upload_stream_to_telegram(
         tg_service,
-        futures::stream::iter(vec![Ok(Bytes::from(data))]),
+        futures::stream::iter(vec![Ok::<Bytes, String>(Bytes::from(data))]),
         filename,
         db_pool,
         folder_path,
@@ -418,15 +418,7 @@ pub(crate) async fn upload_body_to_telegram(
     folder_path: &str,
     max_bytes: usize,
 ) -> Result<String, String> {
-    let stream = body.into_data_stream().map(move |result| {
-        result.map_err(|e| {
-            if e.is_body_too_large() {
-                format!("body exceeds {} bytes", max_bytes)
-            } else {
-                e.to_string()
-            }
-        })
-    });
+    let stream = body.into_data_stream().map(|result| result.map_err(|e| e.to_string()));
 
     upload_stream_to_telegram(tg_service, stream, filename, db_pool, folder_path, Some(max_bytes)).await
 }
