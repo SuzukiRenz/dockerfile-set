@@ -392,7 +392,7 @@ async fn serve_telegram_file(
         .unwrap()
 }
 
-async fn serve_file(
+pub(crate) async fn serve_file(
     state: &AppState,
     meta: &database::FileMetadata,
     headers: &HeaderMap,

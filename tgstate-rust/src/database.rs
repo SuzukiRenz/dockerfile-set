@@ -540,9 +540,14 @@ pub fn update_file_folder(
 ) -> Result<bool, AppErrorKind> {
     let conn = pool.get()?;
     let normalized = normalize_folder_path(folder_path);
+    let inherited_visibility = inherited_folder_visibility_from_conn(&conn, &normalized);
     let rows = conn.execute(
-        "UPDATE files SET folder_path = ?1 WHERE short_id = ?2 OR file_id = ?2",
-        params![normalized, identifier],
+        "UPDATE files
+         SET folder_path = ?1,
+             link_visibility = ?2,
+             expires_at = NULL
+         WHERE short_id = ?3 OR file_id = ?3",
+        params![normalized, inherited_visibility, identifier],
     )?;
     Ok(rows > 0)
 }

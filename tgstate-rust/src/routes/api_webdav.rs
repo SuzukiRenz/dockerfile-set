@@ -13,7 +13,7 @@ use crate::config;
 use crate::constants;
 use crate::database;
 use crate::error::http_error;
-use crate::routes::api_upload;
+use crate::routes::{api_files, api_upload};
 use crate::state::AppState;
 use crate::storage;
 use crate::telegram::service::TelegramService;
@@ -498,14 +498,14 @@ async fn entry_handler(
             }
         }
         "GET" | "HEAD" => match lookup_file(&state, &database::normalize_folder_path(&identifier)) {
-            Some(f) => Response::builder()
-                .status(StatusCode::TEMPORARY_REDIRECT)
-                .header(
-                    header::LOCATION,
-                    format!("/d/{}", f.short_id.unwrap_or(f.file_id)),
-                )
-                .body(axum::body::Body::empty())
-                .unwrap(),
+            Some(f) => api_files::serve_file(
+                &state,
+                &f,
+                &headers,
+                false,
+                method == Method::HEAD,
+            )
+            .await,
             None => http_error(StatusCode::NOT_FOUND, "file not found", "not_found").into_response(),
         },
         "PUT" => {
