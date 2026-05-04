@@ -71,10 +71,9 @@
         </div>
     </div>
 
-    <!-- Image Grid -->
+    <!-- Image Manager -->
     <div class="card image-grid" style="padding: 24px;">
         <input type="checkbox" id="select-all-checkbox" style="display:none;"> <!-- Hidden logic hook -->
-        
         <div class="file-list" id="file-list-disk" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 16px;">
             {% if files %}
                 {% for file in files %}
@@ -90,8 +89,6 @@
                     </div>
                     <div style="padding: 12px;">
                         <div class="text-sm font-medium" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 4px;" title="{{ file.filename }}">{{ file.filename }}</div>
-                        <div class="text-sm text-muted folder-path-text" style="margin-bottom: 4px;">{{ file.folder_path | default(value='') }}</div>
-                        <div class="text-sm text-muted link-settings-text" style="margin-bottom: 4px;">{{ file.link_visibility }}</div>
                         <div class="text-sm text-muted" style="margin-bottom: 12px;">{{ file.filesize_mb }} MB</div>
                         <div style="display: flex; gap: 8px;">
                             <button class="btn btn-secondary btn-sm copy-link-btn" style="flex: 1; height: 32px;">复制</button>
@@ -122,5 +119,5 @@
     </div>
 </div>
 
-<script src="/static/js/main.js?v=4.5"></script>
+<script src="/static/js/main.js?v=4.7"></script>
 {% endblock %}

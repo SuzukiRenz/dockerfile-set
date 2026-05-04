@@ -670,9 +670,53 @@ pub fn list_folder_paths(pool: &DbPool) -> Result<Vec<String>, AppErrorKind> {
             }
         })
         .collect::<Vec<_>>();
+
+    folders.extend(
+        list_folder_settings(pool)?
+            .into_iter()
+            .filter_map(|setting| {
+                let normalized = normalize_folder_path(&setting.folder_path);
+                if normalized.is_empty() {
+                    None
+                } else {
+                    Some(normalized)
+                }
+            }),
+    );
+
     folders.sort();
     folders.dedup();
     Ok(folders)
+}
+
+pub fn ensure_folder_path(pool: &DbPool, folder_path: &str) -> Result<bool, AppErrorKind> {
+    let conn = pool.get()?;
+    let normalized = normalize_folder_path(folder_path);
+    if normalized.is_empty() {
+        return Ok(false);
+    }
+    let visibility = inherited_folder_visibility_from_conn(&conn, &normalized);
+    let rows = conn.execute(
+        "INSERT INTO folder_settings (folder_path, link_visibility, updated_at)
+         VALUES (?1, ?2, CURRENT_TIMESTAMP)
+         ON CONFLICT(folder_path) DO NOTHING",
+        params![normalized, visibility],
+    )?;
+    Ok(rows > 0)
+}
+
+pub fn delete_folder_path(pool: &DbPool, folder_path: &str) -> Result<usize, AppErrorKind> {
+    let conn = pool.get()?;
+    let normalized = normalize_folder_path(folder_path);
+    if normalized.is_empty() {
+        return Ok(0);
+    }
+    let prefix = format!("{}/%", normalized);
+    conn.execute(
+        "DELETE FROM folder_settings WHERE folder_path = ?1 OR folder_path LIKE ?2",
+        params![normalized, prefix],
+    )
+    .map_err(Into::into)
 }
 
 pub fn delete_file_metadata(pool: &DbPool, file_id: &str) -> Result<bool, AppErrorKind> {

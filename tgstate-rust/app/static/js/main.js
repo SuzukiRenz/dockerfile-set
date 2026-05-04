@@ -152,6 +152,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     let folderSettingsMap = new Map();
+    const expandedFolders = new Set();
 
     function getFolderEntries() {
         const folders = new Map();
@@ -179,8 +180,22 @@ document.addEventListener('DOMContentLoaded', () => {
         return getAllItems().filter(item => normalizeFolderPathClient(item.dataset.folderPath || '') === currentFolderPath);
     }
 
+    function isImageHostingView() {
+        return !!document.querySelector('.image-grid');
+    }
+
+    function expandAncestors(path) {
+        let current = normalizeFolderPathClient(path);
+        while (current) {
+            const parent = getParentFolder(current);
+            if (parent) expandedFolders.add(parent);
+            current = parent;
+        }
+    }
+
     function navigateToFolder(path) {
         currentFolderPath = normalizeFolderPathClient(path);
+        expandAncestors(currentFolderPath);
         renderFolderView();
     }
 
@@ -200,22 +215,40 @@ document.addEventListener('DOMContentLoaded', () => {
     function renderFolderTree() {
         if (!folderTree) return;
         const folders = getFolderEntries();
+        const folderMap = new Map(folders.map(folder => [folder.path, folder]));
+        const visibleFolders = folders.filter(folder => {
+            let parent = folder.parent;
+            while (parent) {
+                if (!expandedFolders.has(parent)) return false;
+                parent = folderMap.get(parent)?.parent || '';
+            }
+            return true;
+        });
+        const hasNestedFolders = folders.some(folder => folder.parent);
         const html = [`
             <button type="button" class="btn btn-ghost btn-sm folder-nav-item${currentFolderPath === '' ? ' active' : ''}" data-folder-path="" style="justify-content: flex-start; height: 34px; font-size: 13px;">
                 全部文件
             </button>
         `];
-        folders.forEach(folder => {
+        visibleFolders.forEach(folder => {
             const depth = folder.path.split('/').length - 1;
             const isActive = currentFolderPath === folder.path;
             const badge = folder.visibility === 'private' ? '🔒' : '🌍';
+            const hasChildren = folders.some(candidate => candidate.parent === folder.path);
+            const isExpanded = expandedFolders.has(folder.path);
+            const toggle = hasChildren
+                ? `<span class="folder-toggle" data-folder-path="${folder.path}" title="展开/收起" style="width:18px; height:18px; display:inline-flex; align-items:center; justify-content:center; border-radius:4px; flex:0 0 auto; color: var(--text-secondary);">${isExpanded ? '▾' : '▸'}</span>`
+                : `<span style="width:18px; flex:0 0 auto;"></span>`;
             html.push(`
                 <button type="button" class="btn btn-ghost btn-sm folder-nav-item${isActive ? ' active' : ''}" data-folder-path="${folder.path}" style="justify-content: space-between; height: auto; min-height: 34px; font-size: 13px; padding-left: ${12 + depth * 16}px; gap: 8px;">
-                    <span style="display:flex; align-items:center; gap:6px; min-width:0;"><span>📁</span><span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${folder.name}</span></span>
+                    <span style="display:flex; align-items:center; gap:4px; min-width:0;">${toggle}<span>📁</span><span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${folder.name}</span></span>
                     <span style="font-size:12px; color: var(--text-secondary);">${badge}</span>
                 </button>
             `);
         });
+        if (hasNestedFolders && visibleFolders.length < folders.length) {
+            html.push(`<div class="text-sm text-muted" style="padding: 4px 8px; font-size: 12px;">部分子文件夹已收起</div>`);
+        }
         folderTree.innerHTML = html.join('');
     }
 
@@ -262,7 +295,63 @@ document.addEventListener('DOMContentLoaded', () => {
         hydrateFileIcons(currentFolderGrid);
     }
 
+    function renderImageHostingGrid() {
+        const container = document.getElementById('file-list-disk');
+        if (!container || !isImageHostingView()) return false;
+
+        container.querySelectorAll('.image-folder-card, .image-up-card, .image-empty-card').forEach(el => el.remove());
+
+        const term = (searchInput?.value || '').toLowerCase();
+        const folders = getFolderEntries().filter(folder => folder.parent === currentFolderPath);
+        const items = getAllItems();
+        let visibleCount = 0;
+
+        items.forEach(item => {
+            const matchesTerm = !term || (item.dataset.filename || '').toLowerCase().includes(term);
+            const sameFolder = normalizeFolderPathClient(item.dataset.folderPath || '') === currentFolderPath;
+            const isVisible = sameFolder && matchesTerm;
+            item.style.display = isVisible ? '' : 'none';
+            if (isVisible) visibleCount += 1;
+        });
+
+        const cards = [];
+        if (currentFolderPath) {
+            cards.push(`
+                <button type="button" class="image-up-card btn btn-ghost" data-folder-path="${getParentFolder(currentFolderPath)}" style="height: auto; min-height: 190px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 14px; border: 1px dashed var(--border-color); border-radius: var(--radius-md); background: var(--bg-body);">
+                    <span style="font-size: 34px; line-height: 1;">↩</span>
+                    <span style="font-size: 13px; font-weight: 600;">返回上一级</span>
+                </button>
+            `);
+        }
+
+        folders.forEach(folder => {
+            cards.push(`
+                <button type="button" class="image-folder-card btn btn-ghost" data-folder-path="${folder.path}" title="双击进入 ${folder.name}" style="height: auto; min-height: 190px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 14px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-body);">
+                    <span style="font-size: 42px; line-height: 1;">📁</span>
+                    <span style="font-size: 13px; font-weight: 600; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${folder.name}</span>
+                    <span class="text-sm text-muted" style="font-size: 12px;">双击进入</span>
+                </button>
+            `);
+        });
+
+        if (cards.length > 0) {
+            container.insertAdjacentHTML('afterbegin', cards.join(''));
+        }
+
+        if (visibleCount === 0 && folders.length === 0) {
+            container.insertAdjacentHTML('beforeend', `
+                <div class="image-empty-card" style="grid-column: 1/-1; padding: 40px; text-align: center; color: var(--text-tertiary);">
+                    <p>当前目录暂无图片</p>
+                </div>
+            `);
+        }
+
+        return true;
+    }
+
     function renderFolderTableVisibility() {
+        if (renderImageHostingGrid()) return;
+
         const term = (searchInput?.value || '').toLowerCase();
         const items = getAllItems();
         const hasFolderExplorer = !!(folderTree || currentFolderGrid || folderBreadcrumb || folderNavRootBtn);
@@ -281,7 +370,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const existingEmpty = container.querySelector('.folder-empty-row');
         if (existingEmpty) existingEmpty.remove();
 
-        if (visibleCount === 0 && !document.querySelector('.image-grid')) {
+        if (visibleCount === 0) {
             container.insertAdjacentHTML('beforeend', `
                 <tr class="folder-empty-row">
                     <td colspan="5" style="padding: 36px; text-align: center;">
@@ -360,6 +449,36 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     document.addEventListener('click', (e) => {
+        const toggle = e.target.closest('.folder-toggle');
+        if (toggle) {
+            e.preventDefault();
+            e.stopPropagation();
+            const path = normalizeFolderPathClient(toggle.dataset.folderPath || '');
+            if (expandedFolders.has(path)) {
+                expandedFolders.delete(path);
+            } else if (path) {
+                expandedFolders.add(path);
+            }
+            renderFolderTree();
+            return;
+        }
+
+        const imageFolderBtn = e.target.closest('.image-folder-card');
+        if (imageFolderBtn) {
+            e.preventDefault();
+            if (e.detail >= 2) {
+                navigateToFolder(imageFolderBtn.dataset.folderPath || '');
+            }
+            return;
+        }
+
+        const imageUpBtn = e.target.closest('.image-up-card');
+        if (imageUpBtn) {
+            e.preventDefault();
+            navigateToFolder(imageUpBtn.dataset.folderPath || '');
+            return;
+        }
+
         const folderBtn = e.target.closest('.folder-nav-item, .folder-card, .folder-up-card, .folder-crumb');
         if (folderBtn) {
             e.preventDefault();
@@ -842,7 +961,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function loadFolderSettings() {
-        if (!folderTree) return;
+        if (!folderTree && !isImageHostingView()) return;
         try {
             const res = await fetch('/api/folders');
             const data = await res.json().catch(() => ({}));
@@ -957,8 +1076,6 @@ document.addEventListener('DOMContentLoaded', () => {
                     </div>
                     <div style="padding: 12px;">
                         <div class="text-sm font-medium" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 4px;" title="${file.filename}">${file.filename}</div>
-                        <div class="text-sm text-muted folder-path-text" style="margin-bottom: 4px;">${folderPath}</div>
-                        <div class="text-sm text-muted link-settings-text" style="margin-bottom: 4px;">${file.link_visibility || 'public'}</div>
                         <div class="text-sm text-muted" style="margin-bottom: 12px;">${formattedSize}</div>
                         <div style="display: flex; gap: 8px;">
                             <button class="btn btn-secondary btn-sm copy-link-btn" style="flex: 1; height: 32px;">复制</button>

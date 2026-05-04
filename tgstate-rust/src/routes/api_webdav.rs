@@ -14,6 +14,7 @@ use crate::constants;
 use crate::database;
 use crate::error::http_error;
 use crate::routes::{api_files, api_upload};
+use crate::telegram::service::DeleteResult;
 use crate::state::AppState;
 use crate::storage;
 use crate::telegram::service::TelegramService;
@@ -148,11 +149,40 @@ fn file_virtual_path(file: &database::FileMetadata) -> String {
     }
 }
 
+fn folder_exists(state: &AppState, folder_path: &str) -> bool {
+    let normalized = database::normalize_folder_path(folder_path);
+    if normalized.is_empty() {
+        return true;
+    }
+
+    database::list_folder_paths(&state.db_pool)
+        .unwrap_or_default()
+        .into_iter()
+        .any(|path| database::normalize_folder_path(&path) == normalized)
+}
+
 fn list_folder_entries(state: &AppState, current_path: &str) -> Vec<WebDavListItem> {
     let current = database::normalize_folder_path(current_path);
     let files = database::get_all_files(&state.db_pool).unwrap_or_default();
     let mut folders = std::collections::BTreeSet::new();
     let mut items = Vec::new();
+
+    let current_parts = split_webdav_path(&current);
+    for folder_path in database::list_folder_paths(&state.db_pool).unwrap_or_default() {
+        let parts = split_webdav_path(&folder_path);
+        if parts.len() <= current_parts.len() || parts[..current_parts.len()] != current_parts[..] {
+            continue;
+        }
+        let remaining = &parts[current_parts.len()..];
+        if let Some(folder_rel) = remaining.first() {
+            let folder_full = if current.is_empty() {
+                (*folder_rel).to_string()
+            } else {
+                format!("{}/{}", current, folder_rel)
+            };
+            folders.insert(folder_full);
+        }
+    }
 
     for file in files {
         let virtual_path = file_virtual_path(&file);
@@ -272,6 +302,61 @@ fn get_telegram_service(state: &AppState) -> Result<TelegramService, Response> {
     ))
 }
 
+async fn delete_webdav_file(state: Arc<AppState>, meta: database::FileMetadata) -> Response {
+    if meta.storage_backend == constants::STORAGE_BACKEND_S3 {
+        match storage::s3::delete_object(&state, &meta).await {
+            Ok(_) => match database::delete_file_metadata(&state.db_pool, &meta.file_id) {
+                Ok(true) => StatusCode::NO_CONTENT.into_response(),
+                Ok(false) => http_error(StatusCode::NOT_FOUND, "file not found", "not_found").into_response(),
+                Err(e) => crate::error::AppError::from(e).into_response(),
+            },
+            Err(e) => crate::error::AppError::from(e).into_response(),
+        }
+    } else {
+        let tg_service = match get_telegram_service(&state) {
+            Ok(service) => service,
+            Err(resp) => return resp,
+        };
+        let result: DeleteResult = tg_service.delete_file_with_chunks(&meta.file_id).await;
+        if result.main_message_deleted || result.main_delete_reason == "not_found" {
+            match database::delete_file_metadata(&state.db_pool, &meta.file_id) {
+                Ok(true) => StatusCode::NO_CONTENT.into_response(),
+                Ok(false) => http_error(StatusCode::NOT_FOUND, "file not found", "not_found").into_response(),
+                Err(e) => crate::error::AppError::from(e).into_response(),
+            }
+        } else {
+            tracing::error!("WebDAV DELETE failed: {:?}", result);
+            http_error(StatusCode::BAD_GATEWAY, "delete failed", "webdav_delete_failed").into_response()
+        }
+    }
+}
+
+async fn delete_folder(state: Arc<AppState>, folder_path: &str) -> Response {
+    let normalized = database::normalize_folder_path(folder_path);
+    if normalized.is_empty() {
+        return http_error(StatusCode::BAD_REQUEST, "invalid folder", "invalid_folder").into_response();
+    }
+
+    let prefix = format!("{}/", normalized);
+    let files = database::get_all_files(&state.db_pool)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|file| file.folder_path == normalized || file.folder_path.starts_with(&prefix))
+        .collect::<Vec<_>>();
+
+    for file in files {
+        let response = delete_webdav_file(state.clone(), file).await;
+        if !response.status().is_success() {
+            return response;
+        }
+    }
+
+    match database::delete_folder_path(&state.db_pool, &normalized) {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => crate::error::AppError::from(e).into_response(),
+    }
+}
+
 async fn put_file(state: Arc<AppState>, identifier: String, body: Body) -> Response {
     let normalized_path = database::normalize_folder_path(&identifier);
     let path_parts = split_webdav_path(&normalized_path);
@@ -367,7 +452,7 @@ async fn root_handler(
             if readonly {
                 options_response("OPTIONS, GET, HEAD, PROPFIND")
             } else {
-                options_response("OPTIONS, GET, HEAD, PROPFIND, PUT")
+                options_response("OPTIONS, GET, HEAD, PROPFIND, PUT, MKCOL, DELETE")
             }
         }
         "GET" | "HEAD" => (
@@ -409,7 +494,21 @@ async fn root_handler(
                 StatusCode::METHOD_NOT_ALLOWED.into_response()
             }
         }
-        "DELETE" | "MKCOL" | "MOVE" | "COPY" => {
+        "MKCOL" => {
+            if readonly {
+                readonly_response()
+            } else {
+                http_error(StatusCode::BAD_REQUEST, "invalid folder", "invalid_folder").into_response()
+            }
+        }
+        "DELETE" => {
+            if readonly {
+                readonly_response()
+            } else {
+                http_error(StatusCode::FORBIDDEN, "cannot delete webdav root", "delete_root_forbidden").into_response()
+            }
+        }
+        "MOVE" | "COPY" => {
             if readonly {
                 readonly_response()
             } else {
@@ -443,7 +542,7 @@ async fn entry_handler(
             if readonly {
                 options_response("OPTIONS, PROPFIND, GET, HEAD")
             } else {
-                options_response("OPTIONS, PROPFIND, GET, HEAD, PUT")
+                options_response("OPTIONS, PROPFIND, GET, HEAD, PUT, MKCOL, DELETE")
             }
         }
         "PROPFIND" => {
@@ -469,7 +568,7 @@ async fn entry_handler(
                     .into_response()
             } else {
                 let entries = list_folder_entries(&state, &normalized);
-                if entries.is_empty() {
+                if entries.is_empty() && !folder_exists(&state, &normalized) {
                     http_error(StatusCode::NOT_FOUND, "file not found", "not_found").into_response()
                 } else {
                     let current_name = normalized.rsplit('/').next().unwrap_or(&normalized);
@@ -515,7 +614,48 @@ async fn entry_handler(
                 put_file(state.clone(), identifier, body).await
             }
         }
-        "DELETE" | "MKCOL" | "MOVE" | "COPY" => {
+        "MKCOL" => {
+            if readonly {
+                readonly_response()
+            } else {
+                let normalized = database::normalize_folder_path(&identifier);
+                if normalized.is_empty() {
+                    http_error(StatusCode::BAD_REQUEST, "invalid folder", "invalid_folder").into_response()
+                } else if lookup_file(&state, &normalized).is_some() {
+                    http_error(StatusCode::METHOD_NOT_ALLOWED, "file exists", "file_exists").into_response()
+                } else if folder_exists(&state, &normalized) {
+                    StatusCode::METHOD_NOT_ALLOWED.into_response()
+                } else {
+                    match database::ensure_folder_path(&state.db_pool, &normalized) {
+                        Ok(true) => StatusCode::CREATED.into_response(),
+                        Ok(false) => StatusCode::METHOD_NOT_ALLOWED.into_response(),
+                        Err(e) => crate::error::AppError::from(e).into_response(),
+                    }
+                }
+            }
+        }
+        "DELETE" => {
+            if readonly {
+                readonly_response()
+            } else {
+                let normalized = database::normalize_folder_path(&identifier);
+                if let Some(file) = lookup_file(&state, &normalized) {
+                    delete_webdav_file(state.clone(), file).await
+                } else {
+                    let entries = list_folder_entries(&state, &normalized);
+                    if entries.is_empty() {
+                        match database::delete_folder_path(&state.db_pool, &normalized) {
+                            Ok(0) => http_error(StatusCode::NOT_FOUND, "file not found", "not_found").into_response(),
+                            Ok(_) => StatusCode::NO_CONTENT.into_response(),
+                            Err(e) => crate::error::AppError::from(e).into_response(),
+                        }
+                    } else {
+                        delete_folder(state.clone(), &normalized).await
+                    }
+                }
+            }
+        }
+        "MOVE" | "COPY" => {
             if readonly {
                 readonly_response()
             } else {
