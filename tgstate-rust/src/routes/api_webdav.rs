@@ -2,9 +2,8 @@ use std::sync::Arc;
 
 use axum::body::{to_bytes, Body};
 use axum::extract::{Path, State};
-use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use axum::routing::any;
 use axum::Router;
 use base64::{engine::general_purpose, Engine as _};
 use serde::Serialize;
@@ -434,8 +433,17 @@ async fn put_file(state: Arc<AppState>, identifier: String, body: Body) -> Respo
 async fn root_handler(
     State(state): State<Arc<AppState>>,
     method: Method,
+    uri: Uri,
     headers: HeaderMap,
+    body: Body,
 ) -> Response {
+    if uri.path() != "/webdav" && uri.path() != "/webdav/" {
+        let identifier = uri.path()
+            .trim_start_matches("/webdav/")
+            .trim_start_matches("/webdav")
+            .to_string();
+        return entry_handler(State(state), Path(identifier), method, headers, body).await;
+    }
     if !is_enabled(&state) {
         return http_error(StatusCode::NOT_FOUND, "webdav disabled", "webdav_disabled")
             .into_response();
@@ -667,8 +675,5 @@ async fn entry_handler(
 }
 
 pub fn router() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/webdav", any(root_handler))
-        .route("/webdav/", any(root_handler))
-        .route("/webdav/*identifier", any(entry_handler))
+    Router::new().fallback(root_handler)
 }

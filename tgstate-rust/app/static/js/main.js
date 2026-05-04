@@ -326,10 +326,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
         folders.forEach(folder => {
             cards.push(`
-                <button type="button" class="image-folder-card btn btn-ghost" data-folder-path="${folder.path}" title="双击进入 ${folder.name}" style="height: auto; min-height: 190px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 14px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-body);">
+                <button type="button" class="image-folder-card btn btn-ghost" data-folder-path="${folder.path}" title="进入 ${folder.name}" style="height: auto; min-height: 190px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 14px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-body);">
                     <span style="font-size: 42px; line-height: 1;">📁</span>
                     <span style="font-size: 13px; font-weight: 600; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${folder.name}</span>
-                    <span class="text-sm text-muted" style="font-size: 12px;">双击进入</span>
+                    <span class="text-sm text-muted" style="font-size: 12px;">点击进入</span>
                 </button>
             `);
         });
@@ -466,9 +466,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const imageFolderBtn = e.target.closest('.image-folder-card');
         if (imageFolderBtn) {
             e.preventDefault();
-            if (e.detail >= 2) {
-                navigateToFolder(imageFolderBtn.dataset.folderPath || '');
-            }
+            navigateToFolder(imageFolderBtn.dataset.folderPath || '');
             return;
         }
 
