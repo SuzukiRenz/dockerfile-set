@@ -4,6 +4,7 @@ use axum::body::{to_bytes, Body};
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
+use axum::routing::any;
 use axum::Router;
 use base64::{engine::general_purpose, Engine as _};
 use serde::Serialize;
@@ -23,6 +24,7 @@ struct WebDavListItem {
     href: String,
     name: String,
     size: i64,
+    created: String,
     modified: String,
     is_collection: bool,
 }
@@ -71,7 +73,24 @@ fn webdav_href(name: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("/");
-    format!("/webdav/{}", encoded)
+    if encoded.is_empty() {
+        "/webdav/".to_string()
+    } else {
+        format!("/webdav/{}/", encoded).trim_end_matches('/').to_string()
+    }
+}
+
+fn decode_webdav_identifier(identifier: &str) -> String {
+    identifier
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| {
+            percent_encoding::percent_decode_str(segment)
+                .decode_utf8_lossy()
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn unauthorized_response() -> Response {
@@ -148,6 +167,43 @@ fn file_virtual_path(file: &database::FileMetadata) -> String {
     }
 }
 
+fn webdav_timestamp(value: &str) -> String {
+    let raw = value.trim();
+    if raw.is_empty() {
+        return chrono::Utc::now().to_rfc2822();
+    }
+
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return dt.with_timezone(&chrono::Utc).to_rfc2822();
+    }
+
+    if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S") {
+        return chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(ndt, chrono::Utc).to_rfc2822();
+    }
+
+    if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S") {
+        return chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(ndt, chrono::Utc).to_rfc2822();
+    }
+
+    raw.to_string()
+}
+
+fn collection_timestamp() -> String {
+    chrono::Utc::now().to_rfc2822()
+}
+
+fn file_item_from_meta(file: database::FileMetadata) -> WebDavListItem {
+    let timestamp = webdav_timestamp(&file.upload_date);
+    WebDavListItem {
+        href: webdav_href(&file_virtual_path(&file)),
+        name: file.filename,
+        size: file.filesize,
+        created: timestamp.clone(),
+        modified: timestamp,
+        is_collection: false,
+    }
+}
+
 fn folder_exists(state: &AppState, folder_path: &str) -> bool {
     let normalized = database::normalize_folder_path(folder_path);
     if normalized.is_empty() {
@@ -197,17 +253,7 @@ fn list_folder_entries(state: &AppState, current_path: &str) -> Vec<WebDavListIt
 
         let remaining = &parts[current_parts.len()..];
         if remaining.len() == 1 {
-            items.push(WebDavListItem {
-                href: webdav_href(&virtual_path),
-                name: file.filename.clone(),
-                size: file.filesize,
-                modified: if file.upload_date.is_empty() {
-                    chrono::Utc::now().to_rfc2822()
-                } else {
-                    file.upload_date.clone()
-                },
-                is_collection: false,
-            });
+            items.push(file_item_from_meta(file));
         } else {
             let folder_rel = remaining[0];
             let folder_full = if current.is_empty() {
@@ -221,12 +267,16 @@ fn list_folder_entries(state: &AppState, current_path: &str) -> Vec<WebDavListIt
 
     let mut folder_items = folders
         .into_iter()
-        .map(|folder| WebDavListItem {
-            href: webdav_href(&folder),
-            name: folder.rsplit('/').next().unwrap_or(&folder).to_string(),
-            size: 0,
-            modified: chrono::Utc::now().to_rfc2822(),
-            is_collection: true,
+        .map(|folder| {
+            let timestamp = collection_timestamp();
+            WebDavListItem {
+                href: webdav_href(&folder),
+                name: folder.rsplit('/').next().unwrap_or(&folder).to_string(),
+                size: 0,
+                created: timestamp.clone(),
+                modified: timestamp,
+                is_collection: true,
+            }
         })
         .collect::<Vec<_>>();
 
@@ -250,11 +300,12 @@ fn build_multistatus(base: &str, items: &[WebDavListItem]) -> String {
             ""
         };
         xml.push_str(&format!(
-            "<d:response><d:href>{}</d:href><d:propstat><d:prop><d:displayname>{}</d:displayname><d:getcontentlength>{}</d:getcontentlength><d:getlastmodified>{}</d:getlastmodified><d:resourcetype>{}</d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>",
+            "<d:response><d:href>{}</d:href><d:propstat><d:prop><d:displayname>{}</d:displayname><d:creationdate>{}</d:creationdate><d:getlastmodified>{}</d:getlastmodified><d:getcontentlength>{}</d:getcontentlength><d:resourcetype>{}</d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>",
             xml_escape(&href),
             xml_escape(&item.name),
-            item.size,
+            xml_escape(&item.created),
             xml_escape(&item.modified),
+            item.size,
             resource_type,
         ));
     }
@@ -433,17 +484,8 @@ async fn put_file(state: Arc<AppState>, identifier: String, body: Body) -> Respo
 async fn root_handler(
     State(state): State<Arc<AppState>>,
     method: Method,
-    uri: Uri,
     headers: HeaderMap,
-    body: Body,
 ) -> Response {
-    if uri.path() != "/webdav" && uri.path() != "/webdav/" {
-        let identifier = uri.path()
-            .trim_start_matches("/webdav/")
-            .trim_start_matches("/webdav")
-            .to_string();
-        return entry_handler(State(state), Path(identifier), method, headers, body).await;
-    }
     if !is_enabled(&state) {
         return http_error(StatusCode::NOT_FOUND, "webdav disabled", "webdav_disabled")
             .into_response();
@@ -475,11 +517,13 @@ async fn root_handler(
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("1");
 
+            let timestamp = collection_timestamp();
             let mut items = vec![WebDavListItem {
                 href: "/webdav".into(),
                 name: "webdav".into(),
                 size: 0,
-                modified: chrono::Utc::now().to_rfc2822(),
+                created: timestamp.clone(),
+                modified: timestamp,
                 is_collection: true,
             }];
 
@@ -531,9 +575,12 @@ async fn entry_handler(
     State(state): State<Arc<AppState>>,
     Path(identifier): Path<String>,
     method: Method,
+    uri: Uri,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    let identifier = decode_webdav_identifier(&identifier);
+    let uri_path = uri.path().to_string();
     if !is_enabled(&state) {
         return http_error(StatusCode::NOT_FOUND, "webdav disabled", "webdav_disabled")
             .into_response();
@@ -555,18 +602,9 @@ async fn entry_handler(
         }
         "PROPFIND" => {
             let normalized = database::normalize_folder_path(&identifier);
-            if let Some(f) = lookup_file(&state, &normalized) {
-                let item = WebDavListItem {
-                    href: webdav_href(&file_virtual_path(&f)),
-                    name: f.filename,
-                    size: f.filesize,
-                    modified: if f.upload_date.is_empty() {
-                        chrono::Utc::now().to_rfc2822()
-                    } else {
-                        f.upload_date
-                    },
-                    is_collection: false,
-                };
+            let folder_requested = uri_path.ends_with('/');
+            if let Some(f) = lookup_file(&state, &normalized).filter(|_| !folder_requested || !folder_exists(&state, &normalized)) {
+                let item = file_item_from_meta(f);
                 let body = build_multistatus("", &[item]);
                 (
                     StatusCode::MULTI_STATUS,
@@ -580,11 +618,13 @@ async fn entry_handler(
                     http_error(StatusCode::NOT_FOUND, "file not found", "not_found").into_response()
                 } else {
                     let current_name = normalized.rsplit('/').next().unwrap_or(&normalized);
+                    let timestamp = collection_timestamp();
                     let mut items = vec![WebDavListItem {
                         href: webdav_href(&normalized),
                         name: current_name.to_string(),
                         size: 0,
-                        modified: chrono::Utc::now().to_rfc2822(),
+                        created: timestamp.clone(),
+                        modified: timestamp,
                         is_collection: true,
                     }];
                     let depth = headers
@@ -604,7 +644,7 @@ async fn entry_handler(
                 }
             }
         }
-        "GET" | "HEAD" => match lookup_file(&state, &database::normalize_folder_path(&identifier)) {
+        "GET" | "HEAD" => match lookup_file(&state, &database::normalize_folder_path(&identifier)).filter(|_| !uri_path.ends_with('/') || !folder_exists(&state, &database::normalize_folder_path(&identifier))) {
             Some(f) => api_files::serve_file(
                 &state,
                 &f,
@@ -675,5 +715,8 @@ async fn entry_handler(
 }
 
 pub fn router() -> Router<Arc<AppState>> {
-    Router::new().fallback(root_handler)
+    Router::new()
+        .route("/webdav", any(root_handler))
+        .route("/webdav/", any(root_handler))
+        .route("/webdav/{*identifier}", any(entry_handler))
 }
