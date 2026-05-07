@@ -639,6 +639,21 @@ document.addEventListener('DOMContentLoaded', () => {
         if (doneArea) doneArea.insertAdjacentHTML('afterbegin', successHTML);
     }
 
+    async function getWebUploadChunkThresholdBytes() {
+        if (window.__webUploadChunkThresholdBytes) return window.__webUploadChunkThresholdBytes;
+        try {
+            const res = await fetch('/api/app-config');
+            if (!res.ok) throw new Error('config failed');
+            const data = await res.json();
+            const mb = Number(data?.cfg?.WEB_UPLOAD_CHUNK_THRESHOLD_MB || 90);
+            const safeMb = Number.isFinite(mb) && mb > 0 ? mb : 90;
+            window.__webUploadChunkThresholdBytes = safeMb * 1024 * 1024;
+        } catch (_) {
+            window.__webUploadChunkThresholdBytes = 90 * 1024 * 1024;
+        }
+        return window.__webUploadChunkThresholdBytes;
+    }
+
     async function uploadLargeFileInChunks(file, fileId, progress) {
         const initRes = await fetch('/api/upload/chunk/init', {
             method: 'POST',
@@ -690,21 +705,29 @@ document.addEventListener('DOMContentLoaded', () => {
         return new Promise((resolve) => {
             const fileId = `temp-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
             const progress = renderUploadProgress(file, fileId);
-            const directLimit = 90 * 1024 * 1024;
 
-            if (file.size > directLimit) {
-                uploadLargeFileInChunks(file, fileId, progress)
-                    .then((response) => showUploadSuccess(file, response))
-                    .catch((err) => {
-                        if (window.Toast) Toast.show(err.message || '上传失败', 'error');
-                    })
-                    .finally(() => {
-                        if (progress.row) progress.row.remove();
-                        resolve();
-                    });
-                return;
-            }
+            getWebUploadChunkThresholdBytes().then((directLimit) => {
+                if (file.size > directLimit) {
+                    uploadLargeFileInChunks(file, fileId, progress)
+                        .then((response) => showUploadSuccess(file, response))
+                        .catch((err) => {
+                            if (window.Toast) Toast.show(err.message || '上传失败', 'error');
+                        })
+                        .finally(() => {
+                            if (progress.row) progress.row.remove();
+                            resolve();
+                        });
+                    return;
+                }
 
+                uploadFileDirect(file, progress, resolve);
+            }).catch(() => {
+                uploadFileDirect(file, progress, resolve);
+            });
+        });
+    }
+
+    function uploadFileDirect(file, progress, resolve) {
             const formData = new FormData();
             formData.append('file', file, file.name);
             const xhr = new XMLHttpRequest();
@@ -743,7 +766,6 @@ document.addEventListener('DOMContentLoaded', () => {
             };
 
             xhr.send(formData);
-        });
     }
 
     // --- Batch Actions ---

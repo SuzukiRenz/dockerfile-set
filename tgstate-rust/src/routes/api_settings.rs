@@ -58,6 +58,8 @@ pub struct AppConfigRequest {
     webdav_username: Option<String>,
     #[serde(rename = "WEB_UPLOAD_CHUNK_SIZE_MB")]
     web_upload_chunk_size_mb: Option<String>,
+    #[serde(rename = "WEB_UPLOAD_CHUNK_THRESHOLD_MB")]
+    web_upload_chunk_threshold_mb: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -129,6 +131,20 @@ fn validate_config(
             }
         }
     }
+    if let Some(Some(threshold)) = cfg.get("WEB_UPLOAD_CHUNK_THRESHOLD_MB") {
+        let raw = threshold.trim();
+        if !raw.is_empty() {
+            let mb = match raw.parse::<u64>() {
+                Ok(v) => v,
+                Err(_) => {
+                    return Err((axum::http::StatusCode::BAD_REQUEST, "分片触发阈值必须是数字", "invalid_web_upload_chunk_threshold"));
+                }
+            };
+            if !(1..=2048).contains(&mb) {
+                return Err((axum::http::StatusCode::BAD_REQUEST, "分片触发阈值需在 1-2048 MB 之间", "invalid_web_upload_chunk_threshold"));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -182,6 +198,7 @@ fn merge_config(
     set_opt!(incoming.webdav_readonly, "WEBDAV_READONLY");
     set_opt!(incoming.webdav_username, "WEBDAV_USERNAME");
     set_opt!(incoming.web_upload_chunk_size_mb, "WEB_UPLOAD_CHUNK_SIZE_MB");
+    set_opt!(incoming.web_upload_chunk_threshold_mb, "WEB_UPLOAD_CHUNK_THRESHOLD_MB");
 
     Ok(result)
 }
@@ -267,7 +284,8 @@ async fn get_app_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
             "WEBDAV_ENABLED": settings.get("WEBDAV_ENABLED").and_then(|v| v.as_deref()).unwrap_or("0"),
             "WEBDAV_READONLY": settings.get("WEBDAV_READONLY").and_then(|v| v.as_deref()).unwrap_or("0"),
             "WEBDAV_USERNAME": settings.get("WEBDAV_USERNAME").and_then(|v| v.as_deref()).unwrap_or("admin"),
-            "WEB_UPLOAD_CHUNK_SIZE_MB": settings.get("WEB_UPLOAD_CHUNK_SIZE_MB").and_then(|v| v.as_deref()).unwrap_or("64")
+            "WEB_UPLOAD_CHUNK_SIZE_MB": settings.get("WEB_UPLOAD_CHUNK_SIZE_MB").and_then(|v| v.as_deref()).unwrap_or("64"),
+            "WEB_UPLOAD_CHUNK_THRESHOLD_MB": settings.get("WEB_UPLOAD_CHUNK_THRESHOLD_MB").and_then(|v| v.as_deref()).unwrap_or("90")
         },
         "bot": {
             "ready": bot.bot_ready,
