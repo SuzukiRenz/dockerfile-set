@@ -23,6 +23,9 @@ pub struct Message {
     pub text: Option<String>,
     pub document: Option<Document>,
     pub video: Option<Video>,
+    pub audio: Option<Audio>,
+    pub voice: Option<Voice>,
+    pub animation: Option<Animation>,
     pub photo: Option<Vec<PhotoSize>>,
     pub date: Option<i64>,
     pub reply_to_message: Option<Box<Message>>,
@@ -44,6 +47,29 @@ pub struct Document {
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct Video {
+    pub file_id: String,
+    pub file_name: Option<String>,
+    pub file_size: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct Audio {
+    pub file_id: String,
+    pub file_name: Option<String>,
+    pub file_size: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct Voice {
+    pub file_id: String,
+    pub file_size: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct Animation {
     pub file_id: String,
     pub file_name: Option<String>,
     pub file_size: Option<i64>,

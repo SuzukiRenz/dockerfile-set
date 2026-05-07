@@ -67,6 +67,11 @@
                 </select>
                 <div class="text-sm text-muted mt-4">结合 tgDrive 的多出口思路，先提供 Telegram / S3 双后端。</div>
             </div>
+            <div class="input-group">
+                <label class="input-label">网页分片上传大小（MB）</label>
+                <input type="number" class="input-field" name="WEB_UPLOAD_CHUNK_SIZE_MB" id="WEB_UPLOAD_CHUNK_SIZE_MB" min="5" max="2048" step="1" placeholder="64">
+                <div class="text-sm text-muted mt-4">Cloudflare Free 建议保持 64MB；未经过 Cloudflare 或反代限制更高时可调大，范围 5-2048MB。</div>
+            </div>
             <div class="input-group" style="margin-bottom: 0;">
                 <label class="input-label">PicGo API Key <span id="picgo-key-badge" class="badge badge-success" style="display:none; margin-left: 8px; font-size: 11px;">已配置</span></label>
                 <div style="display: flex; gap: 8px;">
@@ -167,6 +172,8 @@ function initData() {
             }
             const sb = document.getElementById('STORAGE_BACKEND');
             if (sb) sb.value = configState.STORAGE_BACKEND || 'telegram';
+            const webUploadChunkSize = document.getElementById('WEB_UPLOAD_CHUNK_SIZE_MB');
+            if (webUploadChunkSize) webUploadChunkSize.value = configState.WEB_UPLOAD_CHUNK_SIZE_MB || '64';
             const s3Endpoint = document.getElementById('S3_ENDPOINT');
             if (s3Endpoint) s3Endpoint.value = configState.S3_ENDPOINT || '';
             const s3Region = document.getElementById('S3_REGION');

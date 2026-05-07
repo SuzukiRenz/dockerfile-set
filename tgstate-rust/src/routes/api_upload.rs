@@ -2,12 +2,15 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{Multipart, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
+use serde::Deserialize;
+use std::path::{Path, PathBuf};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::auth::{self, COOKIE_NAME};
 use crate::config;
@@ -24,6 +27,18 @@ struct UploadAuthProgress {
     auth_verified: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct ChunkInitRequest {
+    filename: String,
+    filesize: i64,
+    folder_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChunkCompleteRequest {
+    upload_id: String,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum UploadFieldError {
     FileBeforeAuth,
@@ -34,6 +49,73 @@ fn current_storage_backend(app_settings: &config::AppSettingsMap) -> &str {
         .get("STORAGE_BACKEND")
         .and_then(|v| v.as_deref())
         .unwrap_or(constants::STORAGE_BACKEND_TELEGRAM)
+}
+
+fn chunk_upload_root(state: &AppState) -> PathBuf {
+    Path::new(&state.settings.data_dir).join("chunk_uploads")
+}
+
+fn safe_upload_id(raw: &str) -> Option<String> {
+    let clean: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if clean.is_empty() || clean.len() > 80 {
+        None
+    } else {
+        Some(clean)
+    }
+}
+
+fn chunk_upload_dir(state: &AppState, upload_id: &str) -> Option<PathBuf> {
+    safe_upload_id(upload_id).map(|id| chunk_upload_root(state).join(id))
+}
+
+fn metadata_path(dir: &Path) -> PathBuf {
+    dir.join("metadata.json")
+}
+
+fn chunk_path(dir: &Path, index: u32) -> PathBuf {
+    dir.join(format!("chunk-{:06}.part", index))
+}
+
+fn web_upload_chunk_size_bytes(app_settings: &config::AppSettingsMap) -> usize {
+    let mb = app_settings
+        .get("WEB_UPLOAD_CHUNK_SIZE_MB")
+        .and_then(|v| v.as_deref())
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|v| (5..=2048).contains(v))
+        .unwrap_or(64);
+    mb * 1024 * 1024
+}
+
+async fn ensure_upload_allowed(state: &AppState, headers: &HeaderMap) -> Result<config::AppSettingsMap, (u16, &'static str, &'static str)> {
+    let app_settings = config::get_app_settings(&state.settings, &state.db_pool);
+    let has_referer = headers.get("referer").is_some();
+    let cookie_value = headers
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cookies| {
+            cookies.split(';').find_map(|c| {
+                let c = c.trim();
+                c.strip_prefix(&format!("{}=", COOKIE_NAME))
+            })
+        });
+    let picgo_key = app_settings.get("PICGO_API_KEY").and_then(|v| v.as_deref());
+    let pass_word = app_settings.get("PASS_WORD").and_then(|v| v.as_deref());
+    let session_token = app_settings.get("SESSION_TOKEN").and_then(|v| v.as_deref());
+    let header_key = headers.get("x-api-key").and_then(|v| v.to_str().ok());
+
+    auth::ensure_upload_auth(
+        has_referer,
+        cookie_value,
+        picgo_key,
+        pass_word,
+        session_token,
+        header_key,
+    )?;
+
+    Ok(app_settings)
 }
 
 fn advance_upload_auth_state(
@@ -84,6 +166,197 @@ pub(crate) fn sanitize_filename(raw: &str) -> String {
         cutoff = idx;
     }
     clean[..cutoff].to_string()
+}
+
+async fn init_chunk_upload(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<ChunkInitRequest>,
+) -> Result<impl IntoResponse, impl IntoResponse> {
+    let app_settings = ensure_upload_allowed(&state, &headers)
+        .await
+        .map_err(|(status, msg, code)| http_error(StatusCode::from_u16(status).unwrap_or(StatusCode::UNAUTHORIZED), msg, code))?;
+
+    let filename = sanitize_filename(&payload.filename);
+    if filename.is_empty() || payload.filesize <= 0 {
+        return Err(http_error(StatusCode::BAD_REQUEST, "invalid upload metadata", "invalid_upload_metadata"));
+    }
+
+    let chunk_size = web_upload_chunk_size_bytes(&app_settings);
+    let total_chunks_u64 = (payload.filesize as u64 + chunk_size as u64 - 1) / chunk_size as u64;
+    if total_chunks_u64 == 0 || total_chunks_u64 > u32::MAX as u64 {
+        return Err(http_error(StatusCode::BAD_REQUEST, "invalid upload metadata", "invalid_upload_metadata"));
+    }
+    let total_chunks = total_chunks_u64 as u32;
+
+    let upload_id = format!("{}-{}", chrono::Utc::now().timestamp_millis(), database::generate_public_id(16));
+    let dir = chunk_upload_root(&state).join(&upload_id);
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| {
+            tracing::error!("create chunk upload dir failed: {}", e);
+            http_error(StatusCode::INTERNAL_SERVER_ERROR, "init chunk upload failed", "chunk_init_failed")
+        })?;
+
+    let metadata = serde_json::json!({
+        "upload_id": upload_id,
+        "filename": filename,
+        "filesize": payload.filesize,
+        "total_chunks": total_chunks,
+        "chunk_size": chunk_size,
+        "folder_path": database::normalize_folder_path(&payload.folder_path.unwrap_or_default()),
+        "created_at": chrono::Utc::now().to_rfc3339(),
+    });
+    tokio::fs::write(metadata_path(&dir), metadata.to_string())
+        .await
+        .map_err(|e| {
+            tracing::error!("write chunk metadata failed: {}", e);
+            http_error(StatusCode::INTERNAL_SERVER_ERROR, "init chunk upload failed", "chunk_init_failed")
+        })?;
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "upload_id": upload_id,
+        "chunk_size": chunk_size,
+        "total_chunks": total_chunks,
+    })))
+}
+
+async fn upload_chunk(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Result<impl IntoResponse, impl IntoResponse> {
+    ensure_upload_allowed(&state, &headers)
+        .await
+        .map_err(|(status, msg, code)| http_error(StatusCode::from_u16(status).unwrap_or(StatusCode::UNAUTHORIZED), msg, code))?;
+
+    let mut upload_id: Option<String> = None;
+    let mut index: Option<u32> = None;
+    let mut chunk_data: Option<Bytes> = None;
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "upload_id" => upload_id = field.text().await.ok(),
+            "index" => index = field.text().await.ok().and_then(|v| v.parse::<u32>().ok()),
+            "chunk" => chunk_data = Some(field.bytes().await.map_err(|e| {
+                tracing::error!("read upload chunk failed: {}", e);
+                http_error(StatusCode::BAD_REQUEST, "invalid chunk", "invalid_chunk")
+            })?),
+            _ => {}
+        }
+    }
+
+    let upload_id = upload_id.and_then(|v| safe_upload_id(&v))
+        .ok_or_else(|| http_error(StatusCode::BAD_REQUEST, "invalid upload id", "invalid_upload_id"))?;
+    let index = index.ok_or_else(|| http_error(StatusCode::BAD_REQUEST, "invalid chunk index", "invalid_chunk_index"))?;
+    let chunk_data = chunk_data.ok_or_else(|| http_error(StatusCode::BAD_REQUEST, "missing chunk", "missing_chunk"))?;
+
+    let dir = chunk_upload_dir(&state, &upload_id)
+        .ok_or_else(|| http_error(StatusCode::BAD_REQUEST, "invalid upload id", "invalid_upload_id"))?;
+    let metadata_text = tokio::fs::read_to_string(metadata_path(&dir))
+        .await
+        .map_err(|_| http_error(StatusCode::NOT_FOUND, "upload session not found", "upload_not_found"))?;
+    let metadata: serde_json::Value = serde_json::from_str(&metadata_text)
+        .map_err(|_| http_error(StatusCode::BAD_REQUEST, "invalid upload metadata", "invalid_upload_metadata"))?;
+    let chunk_size = metadata.get("chunk_size").and_then(|v| v.as_u64()).unwrap_or(64 * 1024 * 1024) as usize;
+    let total_chunks = metadata.get("total_chunks").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    if total_chunks == 0 || index >= total_chunks {
+        return Err(http_error(StatusCode::BAD_REQUEST, "invalid chunk index", "invalid_chunk_index"));
+    }
+    if chunk_data.len() > chunk_size + 1024 * 1024 {
+        return Err(http_error(StatusCode::BAD_REQUEST, "chunk too large", "chunk_too_large"));
+    }
+
+    tokio::fs::write(chunk_path(&dir, index), chunk_data)
+        .await
+        .map_err(|e| {
+            tracing::error!("write chunk failed: {}", e);
+            http_error(StatusCode::INTERNAL_SERVER_ERROR, "write chunk failed", "chunk_write_failed")
+        })?;
+
+    Ok(Json(serde_json::json!({ "status": "ok", "upload_id": upload_id, "index": index })))
+}
+
+async fn complete_chunk_upload(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<ChunkCompleteRequest>,
+) -> Result<impl IntoResponse, impl IntoResponse> {
+    let app_settings = ensure_upload_allowed(&state, &headers)
+        .await
+        .map_err(|(status, msg, code)| http_error(StatusCode::from_u16(status).unwrap_or(StatusCode::UNAUTHORIZED), msg, code))?;
+    let upload_id = safe_upload_id(&payload.upload_id)
+        .ok_or_else(|| http_error(StatusCode::BAD_REQUEST, "invalid upload id", "invalid_upload_id"))?;
+    let dir = chunk_upload_dir(&state, &upload_id)
+        .ok_or_else(|| http_error(StatusCode::BAD_REQUEST, "invalid upload id", "invalid_upload_id"))?;
+
+    let metadata_text = tokio::fs::read_to_string(metadata_path(&dir))
+        .await
+        .map_err(|_| http_error(StatusCode::NOT_FOUND, "upload session not found", "upload_not_found"))?;
+    let metadata: serde_json::Value = serde_json::from_str(&metadata_text)
+        .map_err(|_| http_error(StatusCode::BAD_REQUEST, "invalid upload metadata", "invalid_upload_metadata"))?;
+    let filename = sanitize_filename(metadata.get("filename").and_then(|v| v.as_str()).unwrap_or("upload"));
+    let total_chunks = metadata.get("total_chunks").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let filesize = metadata.get("filesize").and_then(|v| v.as_i64()).unwrap_or(0);
+    let folder_path = database::normalize_folder_path(metadata.get("folder_path").and_then(|v| v.as_str()).unwrap_or(""));
+    if total_chunks == 0 || filesize <= 0 {
+        return Err(http_error(StatusCode::BAD_REQUEST, "invalid upload metadata", "invalid_upload_metadata"));
+    }
+
+    let assembled_path = dir.join("assembled.bin");
+    let mut output = tokio::fs::File::create(&assembled_path).await.map_err(|e| {
+        tracing::error!("create assembled upload failed: {}", e);
+        http_error(StatusCode::INTERNAL_SERVER_ERROR, "complete upload failed", "chunk_complete_failed")
+    })?;
+    for index in 0..total_chunks {
+        let path = chunk_path(&dir, index);
+        let mut input = tokio::fs::File::open(&path).await.map_err(|_| {
+            http_error(StatusCode::BAD_REQUEST, "missing upload chunk", "missing_chunk")
+        })?;
+        tokio::io::copy(&mut input, &mut output).await.map_err(|e| {
+            tracing::error!("assemble chunk failed: {}", e);
+            http_error(StatusCode::INTERNAL_SERVER_ERROR, "complete upload failed", "chunk_complete_failed")
+        })?;
+    }
+    output.flush().await.ok();
+    drop(output);
+
+    let backend = current_storage_backend(&app_settings);
+    let result = if backend == constants::STORAGE_BACKEND_S3 {
+        let mut data = Vec::new();
+        tokio::fs::File::open(&assembled_path).await
+            .map_err(|_| http_error(StatusCode::INTERNAL_SERVER_ERROR, "complete upload failed", "chunk_complete_failed"))?
+            .read_to_end(&mut data).await
+            .map_err(|_| http_error(StatusCode::INTERNAL_SERVER_ERROR, "complete upload failed", "chunk_complete_failed"))?;
+        storage::s3::upload_bytes_in_folder(&state, &filename, data, filesize, &folder_path).await
+    } else {
+        let bot_token = app_settings.get("BOT_TOKEN").and_then(|v| v.as_deref()).unwrap_or("");
+        let channel_name = app_settings.get("CHANNEL_NAME").and_then(|v| v.as_deref()).unwrap_or("");
+        if bot_token.is_empty() || channel_name.is_empty() {
+            return Err(http_error(StatusCode::SERVICE_UNAVAILABLE, "upload config missing", "cfg_missing"));
+        }
+        let tg_service = TelegramService::new(bot_token.to_string(), channel_name.to_string(), state.http_client.clone());
+        let file = tokio::fs::File::open(&assembled_path).await
+            .map_err(|_| http_error(StatusCode::INTERNAL_SERVER_ERROR, "complete upload failed", "chunk_complete_failed"))?;
+        let stream = tokio_util::io::ReaderStream::new(file).map(|result| result.map_err(|e| e.to_string()));
+        upload_stream_to_telegram(&tg_service, stream, &filename, &state.db_pool, &folder_path, None).await
+    };
+
+    let short_id = result.map_err(|e| {
+        tracing::error!("complete chunk upload failed: {}", e);
+        http_error(StatusCode::INTERNAL_SERVER_ERROR, "upload failed", "upload_failed")
+    })?;
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    let download_path = format!("/d/{}", short_id);
+    Ok(Json(serde_json::json!({
+        "file_id": short_id,
+        "short_id": short_id,
+        "download_path": download_path,
+        "path": download_path,
+        "url": download_path,
+    })))
 }
 
 async fn upload_file(
@@ -289,7 +562,19 @@ fn extract_uploaded_media(message: Message, default_filename: &str) -> Result<(S
         return Ok((format!("{}:{}", message.message_id, video.file_id), video.file_size.unwrap_or(0)));
     }
 
-    Err(format!("No document or video in Telegram response for {}", default_filename))
+    if let Some(audio) = message.audio {
+        return Ok((format!("{}:{}", message.message_id, audio.file_id), audio.file_size.unwrap_or(0)));
+    }
+
+    if let Some(voice) = message.voice {
+        return Ok((format!("{}:{}", message.message_id, voice.file_id), voice.file_size.unwrap_or(0)));
+    }
+
+    if let Some(animation) = message.animation {
+        return Ok((format!("{}:{}", message.message_id, animation.file_id), animation.file_size.unwrap_or(0)));
+    }
+
+    Err(format!("No supported media in Telegram response for {}", default_filename))
 }
 
 async fn stream_upload_to_telegram(
@@ -527,7 +812,11 @@ where
 }
 
 pub fn router() -> Router<Arc<AppState>> {
-    Router::new().route("/api/upload", post(upload_file))
+    Router::new()
+        .route("/api/upload", post(upload_file))
+        .route("/api/upload/chunk/init", post(init_chunk_upload))
+        .route("/api/upload/chunk", post(upload_chunk))
+        .route("/api/upload/chunk/complete", post(complete_chunk_upload))
 }
 
 #[cfg(test)]

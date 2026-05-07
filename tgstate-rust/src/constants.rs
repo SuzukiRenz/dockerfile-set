@@ -1,5 +1,5 @@
-/// Maximum upload body size (512 MB)
-pub const MAX_UPLOAD_BODY_SIZE: usize = 512 * 1024 * 1024;
+/// Maximum single request body size for direct uploads and WebDAV (2 GB)
+pub const MAX_UPLOAD_BODY_SIZE: usize = 2 * 1024 * 1024 * 1024;
 
 /// Telegram chunk size for large file uploads (~19.5 MB, under Telegram's 20MB limit)
 pub const TELEGRAM_CHUNK_SIZE: usize = (19.5 * 1024.0 * 1024.0) as usize;

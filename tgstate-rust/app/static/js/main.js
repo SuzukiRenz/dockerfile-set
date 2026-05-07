@@ -598,61 +598,126 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    function renderUploadProgress(file, fileId) {
+        const progressHTML = `
+            <div class="card" id="progress-${fileId}" style="padding: 16px; margin-bottom: 12px; border: 1px solid var(--border-color);">
+                <div style="display: flex; justify-content: space-between; margin-bottom: 8px; gap: 12px;">
+                    <span style="font-size: 14px; font-weight: 500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${file.name}</span>
+                    <span class="percent" style="font-size: 12px; color: var(--text-secondary); flex:0 0 auto;">0%</span>
+                </div>
+                <div style="height: 4px; background: var(--bg-surface-hover); border-radius: 2px; overflow: hidden;">
+                    <div class="progress-bar" style="width: 0%; height: 100%; background: var(--primary-color); transition: width 0.2s;"></div>
+                </div>
+            </div>`;
+        if (progressArea) progressArea.insertAdjacentHTML('beforeend', progressHTML);
+        return {
+            row: document.getElementById(`progress-${fileId}`),
+            bar: document.querySelector(`#progress-${fileId} .progress-bar`),
+            percent: document.querySelector(`#progress-${fileId} .percent`),
+        };
+    }
+
+    function updateUploadProgress(progress, value, label) {
+        const percent = Math.max(0, Math.min(100, Math.floor(value)));
+        if (progress.bar) progress.bar.style.width = `${percent}%`;
+        if (progress.percent) progress.percent.textContent = label || `${percent}%`;
+    }
+
+    function showUploadSuccess(file, response) {
+        const fileUrl = response.url || response.path || response.download_path;
+        if (window.Toast) Toast.show(`${file.name} 上传成功`);
+        const successHTML = `
+            <div class="card" style="padding: 16px; margin-bottom: 12px; border-left: 4px solid var(--success-color);">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <div style="overflow: hidden; margin-right: 12px;">
+                        <div style="font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${file.name}</div>
+                        <a href="${fileUrl}" target="_blank" style="font-size: 12px; color: var(--primary-color);">${fileUrl}</a>
+                    </div>
+                    <button class="btn btn-secondary btn-sm" onclick="Utils.copy('${fileUrl}')">复制</button>
+                </div>
+            </div>`;
+        if (doneArea) doneArea.insertAdjacentHTML('afterbegin', successHTML);
+    }
+
+    async function uploadLargeFileInChunks(file, fileId, progress) {
+        const initRes = await fetch('/api/upload/chunk/init', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filename: file.name, filesize: file.size })
+        });
+        if (!initRes.ok) throw new Error('初始化分片上传失败');
+        const initData = await initRes.json();
+        const uploadId = initData.upload_id;
+        const chunkSize = Number(initData.chunk_size || (64 * 1024 * 1024));
+        if (!uploadId || !Number.isFinite(chunkSize) || chunkSize <= 0) throw new Error('初始化分片上传失败');
+        const totalChunks = Number(initData.total_chunks || Math.ceil(file.size / chunkSize));
+        if (!Number.isFinite(totalChunks) || totalChunks <= 0) throw new Error('初始化分片上传失败');
+
+        for (let index = 0; index < totalChunks; index += 1) {
+            const start = index * chunkSize;
+            const end = Math.min(file.size, start + chunkSize);
+            const formData = new FormData();
+            formData.append('upload_id', uploadId);
+            formData.append('index', String(index));
+            formData.append('chunk', file.slice(start, end), `${file.name}.part${index}`);
+
+            await new Promise((resolve, reject) => {
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', '/api/upload/chunk', true);
+                xhr.upload.onprogress = ({ loaded, total }) => {
+                    const uploadedBefore = start;
+                    const current = total ? loaded : 0;
+                    updateUploadProgress(progress, ((uploadedBefore + current) / file.size) * 90, `上传 ${index + 1}/${totalChunks}`);
+                };
+                xhr.onload = () => xhr.status === 200 ? resolve() : reject(new Error('分片上传失败'));
+                xhr.onerror = () => reject(new Error('网络错误'));
+                xhr.send(formData);
+            });
+        }
+
+        updateUploadProgress(progress, 92, '合并中...');
+        const completeRes = await fetch('/api/upload/chunk/complete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ upload_id: uploadId })
+        });
+        if (!completeRes.ok) throw new Error('合并上传失败');
+        updateUploadProgress(progress, 100, '100%');
+        return completeRes.json();
+    }
+
     function uploadFile(file) {
         return new Promise((resolve) => {
+            const fileId = `temp-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+            const progress = renderUploadProgress(file, fileId);
+            const directLimit = 90 * 1024 * 1024;
+
+            if (file.size > directLimit) {
+                uploadLargeFileInChunks(file, fileId, progress)
+                    .then((response) => showUploadSuccess(file, response))
+                    .catch((err) => {
+                        if (window.Toast) Toast.show(err.message || '上传失败', 'error');
+                    })
+                    .finally(() => {
+                        if (progress.row) progress.row.remove();
+                        resolve();
+                    });
+                return;
+            }
+
             const formData = new FormData();
             formData.append('file', file, file.name);
-            
             const xhr = new XMLHttpRequest();
             xhr.open('POST', '/api/upload', true);
-            const fileId = `temp-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
-
-            // Initial Progress UI
-            // 使用新版 UI 风格
-            const progressHTML = `
-                <div class="card" id="progress-${fileId}" style="padding: 16px; margin-bottom: 12px; border: 1px solid var(--border-color);">
-                    <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
-                        <span style="font-size: 14px; font-weight: 500;">${file.name}</span>
-                        <span class="percent" style="font-size: 12px; color: var(--text-secondary);">0%</span>
-                    </div>
-                    <div style="height: 4px; background: var(--bg-surface-hover); border-radius: 2px; overflow: hidden;">
-                        <div class="progress-bar" style="width: 0%; height: 100%; background: var(--primary-color); transition: width 0.2s;"></div>
-                    </div>
-                </div>`;
-            
-            if (progressArea) progressArea.insertAdjacentHTML('beforeend', progressHTML);
-            const progressEl = document.querySelector(`#progress-${fileId} .progress-bar`);
-            const percentEl = document.querySelector(`#progress-${fileId} .percent`);
 
             xhr.upload.onprogress = ({ loaded, total }) => {
-                const percent = Math.floor((loaded / total) * 100);
-                if (progressEl) progressEl.style.width = `${percent}%`;
-                if (percentEl) percentEl.textContent = `${percent}%`;
+                updateUploadProgress(progress, total ? (loaded / total) * 100 : 0);
             };
 
             xhr.onload = () => {
-                const progressRow = document.getElementById(`progress-${fileId}`);
-                if (progressRow) progressRow.remove();
-
+                if (progress.row) progress.row.remove();
                 if (xhr.status === 200) {
-                    const response = JSON.parse(xhr.responseText);
-                    const fileUrl = response.url;
-                    
-                    // Success Toast
-                    if (window.Toast) Toast.show(`${file.name} 上传成功`);
-                    
-                    // Add to done area
-                    const successHTML = `
-                        <div class="card" style="padding: 16px; margin-bottom: 12px; border-left: 4px solid var(--success-color);">
-                            <div style="display: flex; justify-content: space-between; align-items: center;">
-                                <div style="overflow: hidden; margin-right: 12px;">
-                                    <div style="font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${file.name}</div>
-                                    <a href="${fileUrl}" target="_blank" style="font-size: 12px; color: var(--primary-color);">${fileUrl}</a>
-                                </div>
-                                <button class="btn btn-secondary btn-sm" onclick="Utils.copy('${fileUrl}')">复制</button>
-                            </div>
-                        </div>`;
-                    if (doneArea) doneArea.insertAdjacentHTML('afterbegin', successHTML);
+                    showUploadSuccess(file, JSON.parse(xhr.responseText));
                 } else {
                     let errorMsg = "上传失败";
                     try {
@@ -666,15 +731,13 @@ document.addEventListener('DOMContentLoaded', () => {
                             errorMsg = parsed.message;
                         }
                     } catch (e) {}
-                    
                     if (window.Toast) Toast.show(errorMsg, 'error');
                 }
                 resolve();
             };
 
             xhr.onerror = () => {
-                const progressRow = document.getElementById(`progress-${fileId}`);
-                if (progressRow) progressRow.remove();
+                if (progress.row) progress.row.remove();
                 if (window.Toast) Toast.show('网络错误', 'error');
                 resolve();
             };

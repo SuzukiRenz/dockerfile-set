@@ -56,6 +56,8 @@ pub struct AppConfigRequest {
     webdav_readonly: Option<String>,
     #[serde(rename = "WEBDAV_USERNAME")]
     webdav_username: Option<String>,
+    #[serde(rename = "WEB_UPLOAD_CHUNK_SIZE_MB")]
+    web_upload_chunk_size_mb: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -113,6 +115,20 @@ fn validate_config(
             return Err((axum::http::StatusCode::BAD_REQUEST, "WEBDAV_USERNAME 不能为空", "invalid_webdav_username"));
         }
     }
+    if let Some(Some(chunk_size)) = cfg.get("WEB_UPLOAD_CHUNK_SIZE_MB") {
+        let raw = chunk_size.trim();
+        if !raw.is_empty() {
+            let mb = match raw.parse::<u64>() {
+                Ok(v) => v,
+                Err(_) => {
+                    return Err((axum::http::StatusCode::BAD_REQUEST, "网页分片大小必须是数字", "invalid_web_upload_chunk_size"));
+                }
+            };
+            if !(5..=2048).contains(&mb) {
+                return Err((axum::http::StatusCode::BAD_REQUEST, "网页分片大小需在 5-2048 MB 之间", "invalid_web_upload_chunk_size"));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -165,6 +181,7 @@ fn merge_config(
     set_opt!(incoming.webdav_enabled, "WEBDAV_ENABLED");
     set_opt!(incoming.webdav_readonly, "WEBDAV_READONLY");
     set_opt!(incoming.webdav_username, "WEBDAV_USERNAME");
+    set_opt!(incoming.web_upload_chunk_size_mb, "WEB_UPLOAD_CHUNK_SIZE_MB");
 
     Ok(result)
 }
@@ -249,7 +266,8 @@ async fn get_app_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
             "S3_PUBLIC_BASE_URL": settings.get("S3_PUBLIC_BASE_URL").and_then(|v| v.as_deref()).unwrap_or(""),
             "WEBDAV_ENABLED": settings.get("WEBDAV_ENABLED").and_then(|v| v.as_deref()).unwrap_or("0"),
             "WEBDAV_READONLY": settings.get("WEBDAV_READONLY").and_then(|v| v.as_deref()).unwrap_or("0"),
-            "WEBDAV_USERNAME": settings.get("WEBDAV_USERNAME").and_then(|v| v.as_deref()).unwrap_or("admin")
+            "WEBDAV_USERNAME": settings.get("WEBDAV_USERNAME").and_then(|v| v.as_deref()).unwrap_or("admin"),
+            "WEB_UPLOAD_CHUNK_SIZE_MB": settings.get("WEB_UPLOAD_CHUNK_SIZE_MB").and_then(|v| v.as_deref()).unwrap_or("64")
         },
         "bot": {
             "ready": bot.bot_ready,
