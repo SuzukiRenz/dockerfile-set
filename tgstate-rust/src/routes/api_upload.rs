@@ -104,7 +104,10 @@ async fn ensure_upload_allowed(state: &AppState, headers: &HeaderMap) -> Result<
     let picgo_key = app_settings.get("PICGO_API_KEY").and_then(|v| v.as_deref());
     let pass_word = app_settings.get("PASS_WORD").and_then(|v| v.as_deref());
     let session_token = app_settings.get("SESSION_TOKEN").and_then(|v| v.as_deref());
-    let header_key = headers.get("x-api-key").and_then(|v| v.to_str().ok());
+    let header_key = headers
+        .get("x-api-key")
+        .or_else(|| headers.get("x-picgo-key"))
+        .and_then(|v| v.to_str().ok());
 
     auth::ensure_upload_auth(
         has_referer,
@@ -404,6 +407,7 @@ async fn upload_file(
 
     let header_key = headers
         .get("x-api-key")
+        .or_else(|| headers.get("x-picgo-key"))
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
     let auth_optional = picgo_key.map_or(true, |k| k.is_empty())
