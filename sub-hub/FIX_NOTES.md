@@ -40,3 +40,11 @@ Expected: `/health` shows the enabled node count from WebUI, and `/sub` returns 
 
 - No plaintext secrets are included in this package.
 - Local nanobot environment did not have Go/gofmt installed, so syntax/build should be validated through the Dockerfile build stage (`golang:1.22-alpine`).
+
+
+## 2026-05-26 note: local subconverter listener
+
+- `127.0.0.1:25500` is the **subconverter** service inside the same container/network namespace.
+- It is only reachable **from inside the container** and is not meant to be accessed from outside.
+- `waitForSubconverter()` in `go/main.go` checks readiness; actual conversion requests still retry per request.
+- If you run `subconverter` as a separate container, change this to its container DNS name, for example `subconverter:25500`.
