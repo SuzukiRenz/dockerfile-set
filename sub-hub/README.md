@@ -66,10 +66,19 @@ docker compose logs -f
 
 ## Adding nodes
 
-**Option A – file (recommended):**
+**Option A – Web UI (recommended for this build):**
 
-Edit `data/nodes.txt` in the project directory. The file is re-read on every
-request – no restart needed.
+Open `/admin`, import or edit your nodes, and save. Nodes are persisted in
+`/data/db.json`. Subscription endpoints now read enabled nodes from `db.json`
+first, so nodes imported from the Web UI are immediately used by Passwall,
+Clash/Mihomo, Shadowrocket-compatible clients, and other subscription clients.
+
+Disabled nodes and empty/duplicate URIs are skipped automatically.
+
+**Option B – file fallback:**
+
+If no enabled nodes exist in `/data/db.json`, edit `data/nodes.txt` in the
+project directory. The file is re-read on every request – no restart needed.
 
 ```
 vmess://eyJ2Ij...
@@ -77,16 +86,17 @@ vless://uuid@host:443?...#NodeName
 trojan://pass@host:443#NodeName
 ```
 
-**Option B – environment variable:**
+**Option C – environment variable fallback:**
 
-Set `NODES` in `.env` (newline-separated):
+Set `NODES` in `.env` (newline-separated or base64-encoded node list):
 
 ```dotenv
 NODES=vless://...#Node1
 trojan://...#Node2
 ```
 
-When `NODES` is set, `nodes.txt` is ignored.
+If Web UI nodes exist, `NODES`/`nodes.txt` are treated only as legacy fallback
+sources and are ignored for normal subscription generation.
 
 ---
 
@@ -106,8 +116,8 @@ curl http://localhost:8080/health
 | `TOKEN` | `change-me-please` | Auth token appended to every subscription URL |
 | `PORT` | `8080` | Host port the Go server listens on |
 | `SUB_NAME` | `My Subscription` | Filename hint in Content-Disposition header |
-| `NODES_FILE` | `/data/nodes.txt` | Path to nodes file inside the container |
-| `NODES` | _(empty)_ | Inline nodes (overrides NODES_FILE when set) |
+| `NODES_FILE` | `/data/nodes.txt` | Legacy fallback nodes file, used only when Web UI has no enabled nodes |
+| `NODES` | _(empty)_ | Legacy fallback inline nodes, newline-separated or base64-encoded |
 
 Subconverter configuration lives in `subconverter/pref.ini` and is baked into
 the image at build time. Re-build after changing it:

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"strings"
@@ -49,7 +50,9 @@ func initDB(path string) (*DB, error) {
 
 	b, err := os.ReadFile(path)
 	if err == nil {
-		json.Unmarshal(b, &db.data)
+		if err := json.Unmarshal(b, &db.data); err != nil {
+			return nil, err
+		}
 	}
 	// ensure defaults
 	if db.data.NextID == 0 {
@@ -86,6 +89,79 @@ func getEnabledNodes(db *DB) ([]Node, error) {
 		}
 	}
 	return out, nil
+}
+
+func getNodeURIs(db *DB) ([]string, error) {
+	nodes, err := getEnabledNodes(db)
+	if err != nil {
+		return nil, err
+	}
+	uris := make([]string, 0, len(nodes))
+	seen := make(map[string]struct{}, len(nodes))
+	for _, n := range nodes {
+		uri := strings.TrimSpace(n.URI)
+		if uri == "" {
+			continue
+		}
+		if _, ok := seen[uri]; ok {
+			continue
+		}
+		seen[uri] = struct{}{}
+		uris = append(uris, uri)
+	}
+	if len(uris) > 0 {
+		return uris, nil
+	}
+	return getLegacyNodeURIs()
+}
+
+func getLegacyNodeURIs() ([]string, error) {
+	seen := map[string]struct{}{}
+	uris := []string{}
+	addRaw := func(raw string) {
+		for _, line := range strings.Split(normalizeNodeSource(raw), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			if _, ok := seen[line]; ok {
+				continue
+			}
+			seen[line] = struct{}{}
+			uris = append(uris, line)
+		}
+	}
+
+	addRaw(os.Getenv("NODES"))
+	if path := envOr("NODES_FILE", "/data/nodes.txt"); path != "" {
+		if b, err := os.ReadFile(path); err == nil {
+			addRaw(string(b))
+		} else if !os.IsNotExist(err) {
+			return nil, err
+		}
+	}
+	return uris, nil
+}
+
+func normalizeNodeSource(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if decoded, err := base64.StdEncoding.DecodeString(raw); err == nil && looksLikeNodeList(string(decoded)) {
+		return string(decoded)
+	}
+	return strings.NewReplacer("\r\n", "\n", "\r", "\n", ",", "\n").Replace(raw)
+}
+
+func looksLikeNodeList(s string) bool {
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, "://") {
+			return true
+		}
+	}
+	return false
 }
 
 func createNode(db *DB, n *Node) error {
@@ -135,7 +211,12 @@ func updateNode(db *DB, n *Node) error {
 	defer db.mu.Unlock()
 	for i, existing := range db.data.Nodes {
 		if existing.ID == n.ID {
+			// Preserve state managed by other endpoints. The Web UI edit form only
+			// submits uri/name, so replacing the whole record would accidentally
+			// disable the node and reset its order.
 			n.CreatedAt = existing.CreatedAt
+			n.Enabled = existing.Enabled
+			n.SortOrder = existing.SortOrder
 			if n.Name == "" {
 				n.Name = extractName(n.URI)
 			}
@@ -144,6 +225,37 @@ func updateNode(db *DB, n *Node) error {
 		}
 	}
 	return nil
+}
+
+func patchNode(db *DB, id int64, updates map[string]any) (*Node, bool, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	for i := range db.data.Nodes {
+		if db.data.Nodes[i].ID != id {
+			continue
+		}
+		if v, ok := updates["uri"].(string); ok {
+			db.data.Nodes[i].URI = strings.TrimSpace(v)
+		}
+		if v, ok := updates["name"].(string); ok {
+			db.data.Nodes[i].Name = strings.TrimSpace(v)
+		}
+		if v, ok := updates["enabled"].(bool); ok {
+			db.data.Nodes[i].Enabled = v
+		}
+		if db.data.Nodes[i].URI == "" {
+			return nil, true, os.ErrInvalid
+		}
+		if db.data.Nodes[i].Name == "" {
+			db.data.Nodes[i].Name = extractName(db.data.Nodes[i].URI)
+		}
+		if err := db.save(); err != nil {
+			return nil, true, err
+		}
+		out := db.data.Nodes[i]
+		return &out, true, nil
+	}
+	return nil, false, nil
 }
 
 func deleteNode(db *DB, id int64) error {

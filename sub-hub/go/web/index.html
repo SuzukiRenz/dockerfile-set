@@ -324,6 +324,12 @@ function updateStats() {
   document.getElementById('stat-disabled').textContent = nodes.length - enabled;
 }
 
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, ch => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[ch]));
+}
+
 function renderNodes() {
   const tbody = document.getElementById('nodes-tbody');
   const empty = document.getElementById('nodes-empty');
@@ -334,19 +340,19 @@ function renderNodes() {
   }
   empty.style.display = 'none';
   tbody.innerHTML = nodes.map((n) => `
-    <tr data-id="${n.id}" draggable="true" ondragstart="onDragStart(event)" ondragover="onDragOver(event)" ondrop="onDrop(event)">
+    <tr data-id="${esc(n.id)}" draggable="true" ondragstart="onDragStart(event)" ondragover="onDragOver(event)" ondrop="onDrop(event)">
       <td class="drag-handle">⋮⋮</td>
-      <td class="name-cell">${n.name || ''}</td>
-      <td class="uri-cell" title="${n.uri}">${n.uri}</td>
+      <td class="name-cell">${esc(n.name || '')}</td>
+      <td class="uri-cell" title="${esc(n.uri)}">${esc(n.uri)}</td>
       <td>
         <label class="toggle">
-          <input type="checkbox" ${n.enabled ? 'checked' : ''} onchange="toggleNodeEnabled('${n.id}', this.checked)">
+          <input type="checkbox" ${n.enabled ? 'checked' : ''} onchange="toggleNodeEnabled('${esc(n.id)}', this.checked)">
           <span class="slider"></span>
         </label>
       </td>
       <td>
-        <button class="btn-icon" title="编辑" onclick="editNode('${n.id}')">✎</button>
-        <button class="btn-icon" title="删除" onclick="deleteNode('${n.id}')">🗑️</button>
+        <button class="btn-icon" title="编辑" onclick="editNode('${esc(n.id)}')">✎</button>
+        <button class="btn-icon" title="删除" onclick="deleteNode('${esc(n.id)}')">🗑️</button>
       </td>
     </tr>`).join('');
 }

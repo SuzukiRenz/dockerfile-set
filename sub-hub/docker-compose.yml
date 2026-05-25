@@ -23,12 +23,13 @@ services:
       # Display name embedded in the Content-Disposition header.
       SUB_NAME: "${SUB_NAME:-My Subscription}"
 
-      # Path inside the container where nodes.txt lives.
+      # Legacy fallback path. Normal Web UI imports are saved to /data/db.json
+      # and are used first by the subscription server.
       # Override only if you change the volume mount below.
       NODES_FILE: "/data/nodes.txt"
 
-      # Alternatively, pass nodes inline (newline-separated proxy URIs).
-      # If NODES is set, NODES_FILE is ignored.
+      # Legacy fallback inline nodes (newline-separated proxy URIs).
+      # Web UI nodes in /data/db.json take priority when enabled nodes exist.
       # NODES: |
       #   vless://uuid@host:443?type=ws&security=tls#Node-1
       #   trojan://password@host:443?type=tcp&security=tls#Node-2

@@ -99,28 +99,24 @@ func waitForSubconverter(timeout time.Duration) {
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
-	nodes, _ := getEnabledNodes(a.db)
+	uris, _ := getNodeURIs(a.db)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"status": "ok", "nodes": len(nodes)})
+	json.NewEncoder(w).Encode(map[string]any{"status": "ok", "nodes": len(uris)})
 }
 
 func (a *App) handleInternalNodes(w http.ResponseWriter, r *http.Request) {
-	nodes, err := getEnabledNodes(a.db)
-	if err != nil || len(nodes) == 0 {
+	uris, err := getNodeURIs(a.db)
+	if err != nil || len(uris) == 0 {
 		http.Error(w, "no nodes", http.StatusNotFound)
 		return
-	}
-	uris := make([]string, 0, len(nodes))
-	for _, n := range nodes {
-		uris = append(uris, n.URI)
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	fmt.Fprint(w, base64.StdEncoding.EncodeToString([]byte(strings.Join(uris, "\n"))))
 }
 
 func (a *App) handleSub(w http.ResponseWriter, r *http.Request) {
-	nodes, err := getEnabledNodes(a.db)
-	if err != nil || len(nodes) == 0 {
+	uris, err := getNodeURIs(a.db)
+	if err != nil || len(uris) == 0 {
 		http.Error(w, "no nodes configured", http.StatusNotFound)
 		return
 	}
@@ -134,10 +130,6 @@ func (a *App) handleSub(w http.ResponseWriter, r *http.Request) {
 
 	// Raw base64
 	if target == "" {
-		uris := make([]string, 0, len(nodes))
-		for _, n := range nodes {
-			uris = append(uris, n.URI)
-		}
 		encoded := base64.StdEncoding.EncodeToString([]byte(strings.Join(uris, "\n")))
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Header().Set("Profile-Update-Interval", "24")
@@ -271,33 +263,53 @@ func (a *App) apiNodes(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, "invalid node id", 400)
 			return
 		}
-		switch r.Method {
-		case http.MethodPut:
-			var n Node
-			if err := json.NewDecoder(r.Body).Decode(&n); err != nil {
-				jsonErr(w, "invalid json", 400)
-				return
+			switch r.Method {
+			case http.MethodPut:
+				var n Node
+				if err := json.NewDecoder(r.Body).Decode(&n); err != nil {
+					jsonErr(w, "invalid json", 400)
+					return
+				}
+				n.ID = id
+				n.URI = strings.TrimSpace(n.URI)
+				if n.URI == "" {
+					jsonErr(w, "uri is required", 400)
+					return
+				}
+				if err := updateNode(a.db, &n); err != nil {
+					jsonErr(w, err.Error(), 500)
+					return
+				}
+				json.NewEncoder(w).Encode(n)
+			case http.MethodPatch:
+				var updates map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
+					jsonErr(w, "invalid json", 400)
+					return
+				}
+				n, found, err := patchNode(a.db, id, updates)
+				if err != nil {
+					if err == os.ErrInvalid {
+						jsonErr(w, "uri is required", 400)
+						return
+					}
+					jsonErr(w, err.Error(), 500)
+					return
+				}
+				if !found {
+					jsonErr(w, "node not found", 404)
+					return
+				}
+				json.NewEncoder(w).Encode(n)
+			case http.MethodDelete:
+				if err := deleteNode(a.db, id); err != nil {
+					jsonErr(w, err.Error(), 500)
+					return
+				}
+				json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			default:
+				http.Error(w, "method not allowed", 405)
 			}
-			n.ID = id
-			n.URI = strings.TrimSpace(n.URI)
-			if n.URI == "" {
-				jsonErr(w, "uri is required", 400)
-				return
-			}
-			if err := updateNode(a.db, &n); err != nil {
-				jsonErr(w, err.Error(), 500)
-				return
-			}
-			json.NewEncoder(w).Encode(n)
-		case http.MethodDelete:
-			if err := deleteNode(a.db, id); err != nil {
-				jsonErr(w, err.Error(), 500)
-				return
-			}
-			json.NewEncoder(w).Encode(map[string]any{"ok": true})
-		default:
-			http.Error(w, "method not allowed", 405)
-		}
 	}
 }
 
