@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::Router;
@@ -352,7 +352,10 @@ fn lock_response(uri_path: &str) -> Response {
                 header::CONTENT_TYPE,
                 "application/xml; charset=utf-8".to_string(),
             ),
-            ("Lock-Token", format!("<{}>", token)),
+            (
+                HeaderName::from_static("lock-token"),
+                format!("<{}>", token),
+            ),
         ],
         body,
     )
