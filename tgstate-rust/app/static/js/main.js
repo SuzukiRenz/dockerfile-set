@@ -1,0 +1,1297 @@
+document.addEventListener('DOMContentLoaded', () => {
+    // --- Global Variables ---
+    const uploadArea = document.getElementById('upload-zone');
+    const fileInput = document.getElementById('file-picker');
+    const progressArea = document.getElementById('prog-zone');
+    const doneArea = document.getElementById('done-zone');
+    const searchInput = document.getElementById('file-search');
+    const previewModal = document.getElementById('image-preview-modal');
+    const previewModalImg = document.getElementById('image-preview-modal-img');
+    const previewModalCaption = document.getElementById('image-preview-caption');
+    const previewModalClose = document.getElementById('image-preview-close');
+    const folderTree = document.getElementById('folder-tree');
+    const currentFolderGrid = document.getElementById('current-folder-grid');
+    const folderBreadcrumb = document.getElementById('folder-breadcrumb');
+    const folderNavRootBtn = document.getElementById('folder-nav-root-btn');
+    let currentFolderPath = '';
+
+    function getActiveCopyFormat() {
+        const activeFormatBtn = document.querySelector('.format-option.active');
+        return activeFormatBtn ? activeFormatBtn.dataset.format : 'url';
+    }
+
+    function buildFileUrl(item) {
+        let url = '';
+
+        const downloadLink = item.querySelector('a[href^="/d/"]');
+        if (downloadLink && downloadLink.href) {
+            url = downloadLink.href;
+        }
+
+        if (!url) {
+            const dsUrl = item.dataset.fileUrl;
+            if (dsUrl && dsUrl !== 'undefined') {
+                url = dsUrl.startsWith('/') ? window.location.origin + dsUrl : dsUrl;
+            }
+        }
+
+        if (!url || url.includes('undefined')) {
+            const shortId = item.dataset.shortId;
+            const fileId = item.dataset.fileId;
+            const id = (shortId && shortId !== 'None' && shortId !== '') ? shortId : fileId;
+            url = window.location.origin + `/d/${id}`;
+        }
+
+        if (url.includes('undefined')) {
+            console.warn('Constructed URL contained undefined, falling back to raw fileId');
+            url = window.location.origin + '/d/' + (item.dataset.fileId || 'error');
+        }
+
+        return url;
+    }
+
+    function buildCopyText(item, format) {
+        const url = buildFileUrl(item);
+        const name = item.dataset.filename || 'file';
+
+        if (format === 'markdown') return `![${name}](${url})`;
+        if (format === 'html') return `<img src="${url}" alt="${name}">`;
+        return url;
+    }
+
+    function formatLinkSettings(item) {
+        return item.dataset.linkVisibility || 'public';
+    }
+
+    function itemMatchesScope(item, selectedFolder, includeSubfolders) {
+        const folderPath = item.dataset.folderPath || '';
+        if (!selectedFolder) return false;
+        if (folderPath === selectedFolder) return true;
+        if (includeSubfolders && folderPath.startsWith(`${selectedFolder}/`)) return true;
+        return false;
+    }
+
+    function updateItemLinkSettings(item, visibility) {
+        if (!item) return;
+        item.dataset.linkVisibility = visibility || 'public';
+        delete item.dataset.expiresAt;
+        const label = item.querySelector('.link-settings-text');
+        if (label) {
+            label.textContent = formatLinkSettings(item);
+        }
+    }
+
+    function normalizeFolderPathClient(value) {
+        return String(value || '')
+            .replace(/\\/g, '/')
+            .split('/')
+            .map(part => part.trim())
+            .filter(part => part && part !== '.' && part !== '..')
+            .join('/');
+    }
+
+    function getParentFolder(path) {
+        const normalized = normalizeFolderPathClient(path);
+        if (!normalized) return '';
+        const parts = normalized.split('/');
+        parts.pop();
+        return parts.join('/');
+    }
+
+    function getFileExtension(filename) {
+        const name = String(filename || '').trim().toLowerCase();
+        const idx = name.lastIndexOf('.');
+        if (idx <= 0 || idx === name.length - 1) return '';
+        return name.slice(idx + 1);
+    }
+
+    function getFileCategory(filename) {
+        const ext = getFileExtension(filename);
+        const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'avif', 'heic'];
+        const videoExts = ['mp4', 'mkv', 'mov', 'avi', 'webm', 'm4v', 'flv'];
+        const audioExts = ['mp3', 'm4a', 'aac', 'wav', 'flac', 'ogg', 'opus', 'wma', 'aiff'];
+        const pdfExts = ['pdf'];
+        const documentExts = ['doc', 'docx', 'odt', 'rtf', 'pages'];
+        const spreadsheetExts = ['xls', 'xlsx', 'ods', 'numbers'];
+        const presentationExts = ['ppt', 'pptx', 'odp', 'key'];
+        const textExts = ['txt', 'log', 'csv', 'md'];
+        const archiveExts = ['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz', 'tgz'];
+        const codeExts = ['js', 'ts', 'tsx', 'jsx', 'rs', 'py', 'go', 'java', 'c', 'cpp', 'h', 'hpp', 'cs', 'php', 'rb', 'swift', 'kt', 'json', 'yaml', 'yml', 'toml', 'xml', 'html', 'css', 'scss', 'sql', 'sh', 'bat', 'ps1', 'md'];
+
+        if (imageExts.includes(ext)) return 'image';
+        if (videoExts.includes(ext)) return 'video';
+        if (audioExts.includes(ext)) return 'audio';
+        if (pdfExts.includes(ext)) return 'pdf';
+        if (documentExts.includes(ext)) return 'document';
+        if (spreadsheetExts.includes(ext)) return 'spreadsheet';
+        if (presentationExts.includes(ext)) return 'presentation';
+        if (textExts.includes(ext)) return 'text';
+        if (archiveExts.includes(ext)) return 'archive';
+        if (codeExts.includes(ext)) return 'code';
+        return 'default';
+    }
+
+    function getFileIconSvg(filename, size = 20) {
+        const category = getFileCategory(filename);
+        const styles = {
+            image: 'color:#10b981;',
+            video: 'color:#8b5cf6;',
+            audio: 'color:#ec4899;',
+            pdf: 'color:#ef4444;',
+            document: 'color:#2563eb;',
+            spreadsheet: 'color:#16a34a;',
+            presentation: 'color:#f97316;',
+            text: 'color:#64748b;',
+            archive: 'color:#f59e0b;',
+            code: 'color:#3b82f6;',
+            default: 'color:var(--primary-color);',
+        };
+        const style = styles[category] || styles.default;
+
+        if (category === 'image') {
+            return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="${style}"><rect x="3" y="3" width="18" height="18" rx="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>`;
+        }
+        if (category === 'video') {
+            return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="${style}"><rect x="2" y="6" width="15" height="12" rx="2"></rect><polygon points="17 10 22 7 22 17 17 14 17 10"></polygon></svg>`;
+        }
+        if (category === 'audio') {
+            return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="${style}"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>`;
+        }
+        if (category === 'pdf') {
+            return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="${style}"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><path d="M14 2v6h6"></path><path d="M8 17h8"></path><path d="M8 13h3"></path></svg>`;
+        }
+        if (category === 'document') {
+            return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="${style}"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><path d="M14 2v6h6"></path><path d="M8 13h8"></path><path d="M8 17h8"></path></svg>`;
+        }
+        if (category === 'spreadsheet') {
+            return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="${style}"><rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M3 9h18"></path><path d="M3 15h18"></path><path d="M9 9v12"></path><path d="M15 9v12"></path></svg>`;
+        }
+        if (category === 'presentation') {
+            return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="${style}"><path d="M2 3h20v12H2z"></path><path d="M12 15v6"></path><path d="M8 21h8"></path><path d="M7 8h10"></path></svg>`;
+        }
+        if (category === 'text') {
+            return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="${style}"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><path d="M14 2v6h6"></path><path d="M8 12h8"></path><path d="M8 16h6"></path></svg>`;
+        }
+        if (category === 'archive') {
+            return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="${style}"><path d="M21 8v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8"></path><path d="M1 8h22"></path><path d="M10 12h4"></path><path d="M10 16h4"></path><path d="M9 4h6l1 4H8l1-4z"></path></svg>`;
+        }
+        if (category === 'code') {
+            return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="${style}"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>`;
+        }
+        return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="${style}"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>`;
+    }
+
+    function hydrateFileIcons(root = document) {
+        root.querySelectorAll('.file-type-icon[data-filename]').forEach(node => {
+            node.innerHTML = getFileIconSvg(node.dataset.filename || '', Number(node.dataset.iconSize || 20));
+        });
+    }
+
+    let folderSettingsMap = new Map();
+    const expandedFolders = new Set();
+
+    function getFolderEntries() {
+        const folders = new Map();
+        getAllItems().forEach(item => {
+            const folderPath = normalizeFolderPathClient(item.dataset.folderPath || '');
+            let acc = '';
+            folderPath.split('/').filter(Boolean).forEach(part => {
+                acc = acc ? `${acc}/${part}` : part;
+                if (!folders.has(acc)) {
+                    const setting = folderSettingsMap.get(acc);
+                    folders.set(acc, {
+                        path: acc,
+                        name: part,
+                        parent: getParentFolder(acc),
+                        visibility: setting?.link_visibility || setting?.inherited_visibility || 'public',
+                        explicitVisibility: setting?.explicit_visibility || null,
+                    });
+                }
+            });
+        });
+        return Array.from(folders.values()).sort((a, b) => a.path.localeCompare(b.path, 'zh-CN'));
+    }
+
+    function getVisibleItemsForCurrentFolder() {
+        return getAllItems().filter(item => normalizeFolderPathClient(item.dataset.folderPath || '') === currentFolderPath);
+    }
+
+    function isImageHostingView() {
+        return !!document.querySelector('.image-grid');
+    }
+
+    function expandAncestors(path) {
+        let current = normalizeFolderPathClient(path);
+        while (current) {
+            const parent = getParentFolder(current);
+            if (parent) expandedFolders.add(parent);
+            current = parent;
+        }
+    }
+
+    function navigateToFolder(path) {
+        currentFolderPath = normalizeFolderPathClient(path);
+        expandAncestors(currentFolderPath);
+        renderFolderView();
+    }
+
+    function renderFolderBreadcrumb() {
+        if (!folderBreadcrumb) return;
+        const segments = currentFolderPath ? currentFolderPath.split('/') : [];
+        const crumbs = ['<button type="button" class="btn btn-ghost btn-sm folder-crumb" data-folder-path="" style="height: 28px; font-size: 12px;">根目录</button>'];
+        let acc = '';
+        segments.forEach(segment => {
+            acc = acc ? `${acc}/${segment}` : segment;
+            crumbs.push(`<span style="color: var(--text-tertiary);">/</span>`);
+            crumbs.push(`<button type="button" class="btn btn-ghost btn-sm folder-crumb" data-folder-path="${acc}" style="height: 28px; font-size: 12px;">${segment}</button>`);
+        });
+        folderBreadcrumb.innerHTML = crumbs.join('');
+    }
+
+    function renderFolderTree() {
+        if (!folderTree) return;
+        const folders = getFolderEntries();
+        const folderMap = new Map(folders.map(folder => [folder.path, folder]));
+        const visibleFolders = folders.filter(folder => {
+            let parent = folder.parent;
+            while (parent) {
+                if (!expandedFolders.has(parent)) return false;
+                parent = folderMap.get(parent)?.parent || '';
+            }
+            return true;
+        });
+        const hasNestedFolders = folders.some(folder => folder.parent);
+        const html = [`
+            <button type="button" class="btn btn-ghost btn-sm folder-nav-item${currentFolderPath === '' ? ' active' : ''}" data-folder-path="" style="justify-content: flex-start; height: 34px; font-size: 13px;">
+                全部文件
+            </button>
+        `];
+        visibleFolders.forEach(folder => {
+            const depth = folder.path.split('/').length - 1;
+            const isActive = currentFolderPath === folder.path;
+            const badge = folder.visibility === 'private' ? '🔒' : '🌍';
+            const hasChildren = folders.some(candidate => candidate.parent === folder.path);
+            const isExpanded = expandedFolders.has(folder.path);
+            const toggle = hasChildren
+                ? `<span class="folder-toggle" data-folder-path="${folder.path}" title="展开/收起" style="width:18px; height:18px; display:inline-flex; align-items:center; justify-content:center; border-radius:4px; flex:0 0 auto; color: var(--text-secondary);">${isExpanded ? '▾' : '▸'}</span>`
+                : `<span style="width:18px; flex:0 0 auto;"></span>`;
+            html.push(`
+                <button type="button" class="btn btn-ghost btn-sm folder-nav-item${isActive ? ' active' : ''}" data-folder-path="${folder.path}" style="justify-content: space-between; height: auto; min-height: 34px; font-size: 13px; padding-left: ${12 + depth * 16}px; gap: 8px;">
+                    <span style="display:flex; align-items:center; gap:4px; min-width:0;">${toggle}<span>📁</span><span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${folder.name}</span></span>
+                    <span style="font-size:12px; color: var(--text-secondary);">${badge}</span>
+                </button>
+            `);
+        });
+        if (hasNestedFolders && visibleFolders.length < folders.length) {
+            html.push(`<div class="text-sm text-muted" style="padding: 4px 8px; font-size: 12px;">部分子文件夹已收起</div>`);
+        }
+        folderTree.innerHTML = html.join('');
+    }
+
+    function renderCurrentFolderGrid() {
+        if (!currentFolderGrid) return;
+        const folders = getFolderEntries().filter(folder => folder.parent === currentFolderPath);
+        const files = getVisibleItemsForCurrentFolder();
+        const cards = [];
+
+        if (currentFolderPath) {
+            cards.push(`
+                <button type="button" class="btn btn-ghost folder-up-card" data-folder-path="${getParentFolder(currentFolderPath)}" style="height: auto; min-height: 92px; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 8px; padding: 14px; border: 1px dashed var(--border-color);">
+                    <span style="font-size: 24px;">↩</span>
+                    <span style="font-size: 13px; font-weight: 600;">返回上一级</span>
+                </button>
+            `);
+        }
+
+        folders.forEach(folder => {
+            cards.push(`
+                <button type="button" class="btn btn-ghost folder-card" data-folder-path="${folder.path}" style="height: auto; min-height: 92px; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 8px; padding: 14px; border: 1px solid var(--border-color);">
+                    <span style="font-size: 24px;">📁</span>
+                    <span style="font-size: 13px; font-weight: 600; text-align: left; word-break: break-all;">${folder.name}</span>
+                </button>
+            `);
+        });
+
+        files.forEach(item => {
+            const fileId = item.dataset.fileId || '';
+            const filename = item.dataset.filename || 'file';
+            cards.push(`
+                <button type="button" class="btn btn-ghost folder-file-card" data-file-id="${fileId}" style="height: auto; min-height: 92px; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 8px; padding: 14px; border: 1px solid var(--border-color);">
+                    <span class="file-type-icon" data-filename="${filename}" data-icon-size="24" style="display:flex; align-items:center; justify-content:center; min-height:24px;"></span>
+                    <span style="font-size: 13px; font-weight: 600; text-align: left; word-break: break-all;">${filename}</span>
+                </button>
+            `);
+        });
+
+        if (cards.length === 0) {
+            cards.push('<div class="text-sm text-muted" style="padding: 8px 4px;">当前目录暂无内容</div>');
+        }
+
+        currentFolderGrid.innerHTML = cards.join('');
+        hydrateFileIcons(currentFolderGrid);
+    }
+
+    function renderImageHostingGrid() {
+        const container = document.getElementById('file-list-disk');
+        if (!container || !isImageHostingView()) return false;
+
+        container.querySelectorAll('.image-folder-card, .image-up-card, .image-empty-card').forEach(el => el.remove());
+
+        const term = (searchInput?.value || '').toLowerCase();
+        const folders = getFolderEntries().filter(folder => folder.parent === currentFolderPath);
+        const items = getAllItems();
+        let visibleCount = 0;
+
+        items.forEach(item => {
+            const matchesTerm = !term || (item.dataset.filename || '').toLowerCase().includes(term);
+            const sameFolder = normalizeFolderPathClient(item.dataset.folderPath || '') === currentFolderPath;
+            const isVisible = sameFolder && matchesTerm;
+            item.style.display = isVisible ? '' : 'none';
+            if (isVisible) visibleCount += 1;
+        });
+
+        const cards = [];
+        if (currentFolderPath) {
+            cards.push(`
+                <button type="button" class="image-up-card btn btn-ghost" data-folder-path="${getParentFolder(currentFolderPath)}" style="height: auto; min-height: 190px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 14px; border: 1px dashed var(--border-color); border-radius: var(--radius-md); background: var(--bg-body);">
+                    <span style="font-size: 34px; line-height: 1;">↩</span>
+                    <span style="font-size: 13px; font-weight: 600;">返回上一级</span>
+                </button>
+            `);
+        }
+
+        folders.forEach(folder => {
+            cards.push(`
+                <button type="button" class="image-folder-card btn btn-ghost" data-folder-path="${folder.path}" title="进入 ${folder.name}" style="height: auto; min-height: 190px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 14px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-body);">
+                    <span style="font-size: 42px; line-height: 1;">📁</span>
+                    <span style="font-size: 13px; font-weight: 600; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${folder.name}</span>
+                    <span class="text-sm text-muted" style="font-size: 12px;">点击进入</span>
+                </button>
+            `);
+        });
+
+        if (cards.length > 0) {
+            container.insertAdjacentHTML('afterbegin', cards.join(''));
+        }
+
+        if (visibleCount === 0 && folders.length === 0) {
+            container.insertAdjacentHTML('beforeend', `
+                <div class="image-empty-card" style="grid-column: 1/-1; padding: 40px; text-align: center; color: var(--text-tertiary);">
+                    <p>当前目录暂无图片</p>
+                </div>
+            `);
+        }
+
+        return true;
+    }
+
+    function renderFolderTableVisibility() {
+        if (renderImageHostingGrid()) return;
+
+        const term = (searchInput?.value || '').toLowerCase();
+        const items = getAllItems();
+        const hasFolderExplorer = !!(folderTree || currentFolderGrid || folderBreadcrumb || folderNavRootBtn);
+        let visibleCount = 0;
+
+        items.forEach(item => {
+            const matchesTerm = !term || (item.dataset.filename || '').toLowerCase().includes(term);
+            const sameFolder = normalizeFolderPathClient(item.dataset.folderPath || '') === currentFolderPath;
+            const isVisible = hasFolderExplorer ? (sameFolder && matchesTerm) : matchesTerm;
+            item.style.display = isVisible ? '' : 'none';
+            if (isVisible) visibleCount += 1;
+        });
+
+        const container = document.getElementById('file-list-disk');
+        if (!container) return;
+        const existingEmpty = container.querySelector('.folder-empty-row');
+        if (existingEmpty) existingEmpty.remove();
+
+        if (visibleCount === 0) {
+            container.insertAdjacentHTML('beforeend', `
+                <tr class="folder-empty-row">
+                    <td colspan="5" style="padding: 36px; text-align: center;">
+                        <div class="text-muted">当前目录暂无文件</div>
+                    </td>
+                </tr>
+            `);
+        }
+    }
+
+    function updateFolderSettingsPanel() {
+        const folderSettingsCurrent = document.getElementById('folder-settings-current');
+        const folderVisibilityInput = document.getElementById('folder-visibility-input');
+        if (!folderSettingsCurrent || !folderVisibilityInput) return;
+
+        if (!currentFolderPath) {
+            folderSettingsCurrent.textContent = '请选择左侧文件夹';
+            folderVisibilityInput.value = 'public';
+            return;
+        }
+
+        const setting = folderSettingsMap.get(currentFolderPath);
+        const visibility = setting?.link_visibility || setting?.inherited_visibility || 'public';
+        const sourceText = setting?.explicit_visibility ? '显式配置' : '继承配置';
+        folderSettingsCurrent.textContent = `${currentFolderPath} · ${visibility} · ${sourceText}`;
+        folderVisibilityInput.value = visibility;
+    }
+
+    function renderFolderView() {
+        if (folderTree || currentFolderGrid || folderBreadcrumb) {
+            renderFolderTree();
+            renderFolderBreadcrumb();
+            renderCurrentFolderGrid();
+            updateFolderSettingsPanel();
+        }
+        renderFolderTableVisibility();
+        updateBatchControls();
+    }
+
+    function openPreview(item) {
+        if (!previewModal || !previewModalImg || !previewModalCaption) return;
+        const url = buildFileUrl(item);
+        const name = item.dataset.filename || '';
+        previewModalImg.src = url;
+        previewModalImg.alt = name;
+        previewModalCaption.textContent = name;
+        previewModal.classList.remove('hidden');
+        previewModal.style.display = 'flex';
+        document.body.style.overflow = 'hidden';
+    }
+
+    function closePreview() {
+        if (!previewModal || !previewModalImg) return;
+        previewModal.classList.add('hidden');
+        previewModal.style.display = 'none';
+        previewModalImg.removeAttribute('src');
+        previewModalImg.alt = '';
+        if (previewModalCaption) previewModalCaption.textContent = '';
+        document.body.style.overflow = '';
+    }
+
+    if (previewModalClose) {
+        previewModalClose.addEventListener('click', closePreview);
+    }
+
+    if (previewModal) {
+        previewModal.addEventListener('click', (e) => {
+            if (e.target === previewModal) closePreview();
+        });
+    }
+
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && previewModal && !previewModal.classList.contains('hidden')) {
+            closePreview();
+        }
+    });
+
+    document.addEventListener('click', (e) => {
+        const toggle = e.target.closest('.folder-toggle');
+        if (toggle) {
+            e.preventDefault();
+            e.stopPropagation();
+            const path = normalizeFolderPathClient(toggle.dataset.folderPath || '');
+            if (expandedFolders.has(path)) {
+                expandedFolders.delete(path);
+            } else if (path) {
+                expandedFolders.add(path);
+            }
+            renderFolderTree();
+            return;
+        }
+
+        const imageFolderBtn = e.target.closest('.image-folder-card');
+        if (imageFolderBtn) {
+            e.preventDefault();
+            navigateToFolder(imageFolderBtn.dataset.folderPath || '');
+            return;
+        }
+
+        const imageUpBtn = e.target.closest('.image-up-card');
+        if (imageUpBtn) {
+            e.preventDefault();
+            navigateToFolder(imageUpBtn.dataset.folderPath || '');
+            return;
+        }
+
+        const folderBtn = e.target.closest('.folder-nav-item, .folder-card, .folder-up-card, .folder-crumb');
+        if (folderBtn) {
+            e.preventDefault();
+            navigateToFolder(folderBtn.dataset.folderPath || '');
+            return;
+        }
+
+        const fileCard = e.target.closest('.folder-file-card');
+        if (fileCard) {
+            e.preventDefault();
+            const fileId = fileCard.dataset.fileId || '';
+            const row = document.getElementById(`file-item-${fileId.replace(/:/g, '-')}`);
+            if (row) {
+                row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                row.style.background = 'var(--primary-light)';
+                setTimeout(() => {
+                    row.style.background = '';
+                }, 1200);
+            }
+            return;
+        }
+    });
+
+    if (folderNavRootBtn) {
+        folderNavRootBtn.addEventListener('click', () => navigateToFolder(''));
+    }
+
+    // --- Copy Link Delegation ---
+    document.addEventListener('click', (e) => {
+        const previewBtn = e.target.closest('.preview-image-btn');
+        if (previewBtn) {
+            e.preventDefault();
+            const item = previewBtn.closest('.file-item, .image-card');
+            if (item) openPreview(item);
+            return;
+        }
+
+        const btn = e.target.closest('.copy-link-btn');
+        if (!btn) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        const item = btn.closest('.file-item, .image-card');
+        if (!item) return;
+        if (btn.hasAttribute('onclick')) return;
+
+        Utils.copy(buildCopyText(item, getActiveCopyFormat()));
+    });
+
+    // --- Search Functionality ---
+    if (searchInput) {
+        searchInput.addEventListener('input', () => {
+            renderFolderView();
+        });
+    }
+
+    // --- Upload Logic ---
+    if (uploadArea && fileInput) {
+        // Prevent double dialog by stopping propagation from input
+        fileInput.addEventListener('click', (e) => e.stopPropagation());
+
+        uploadArea.addEventListener('click', (e) => {
+             // Only trigger if not clicking the input itself (though propagation stop handles it, this is extra safety)
+             if (e.target !== fileInput) {
+                 fileInput.click();
+             }
+        });
+
+        uploadArea.addEventListener('dragover', (event) => {
+            event.preventDefault();
+            uploadArea.style.borderColor = 'var(--primary-color)';
+            uploadArea.style.backgroundColor = 'var(--bg-surface-hover)';
+        });
+
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.style.borderColor = '';
+            uploadArea.style.backgroundColor = '';
+        });
+
+        uploadArea.addEventListener('drop', (event) => {
+            event.preventDefault();
+            uploadArea.style.borderColor = '';
+            uploadArea.style.backgroundColor = '';
+            const files = event.dataTransfer.files;
+            if (files.length > 0) {
+                handleFiles(files);
+            }
+        });
+
+        fileInput.addEventListener('change', ({ target }) => {
+            if (target.files.length > 0) {
+                handleFiles(target.files);
+            }
+        });
+    }
+
+    // Queue system for uploads
+    const uploadQueue = [];
+    let isUploading = false;
+
+    function handleFiles(files) {
+        if (progressArea) progressArea.innerHTML = ''; 
+        
+        for (const file of files) {
+            uploadQueue.push(file);
+        }
+        processQueue();
+    }
+
+    function processQueue() {
+        if (isUploading || uploadQueue.length === 0) return;
+        
+        isUploading = true;
+        const file = uploadQueue.shift();
+        uploadFile(file).then(() => {
+            isUploading = false;
+            processQueue();
+        });
+    }
+
+    function renderUploadProgress(file, fileId) {
+        const progressHTML = `
+            <div class="card" id="progress-${fileId}" style="padding: 16px; margin-bottom: 12px; border: 1px solid var(--border-color);">
+                <div style="display: flex; justify-content: space-between; margin-bottom: 8px; gap: 12px;">
+                    <span style="font-size: 14px; font-weight: 500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${file.name}</span>
+                    <span class="percent" style="font-size: 12px; color: var(--text-secondary); flex:0 0 auto;">0%</span>
+                </div>
+                <div style="height: 4px; background: var(--bg-surface-hover); border-radius: 2px; overflow: hidden;">
+                    <div class="progress-bar" style="width: 0%; height: 100%; background: var(--primary-color); transition: width 0.2s;"></div>
+                </div>
+            </div>`;
+        if (progressArea) progressArea.insertAdjacentHTML('beforeend', progressHTML);
+        return {
+            row: document.getElementById(`progress-${fileId}`),
+            bar: document.querySelector(`#progress-${fileId} .progress-bar`),
+            percent: document.querySelector(`#progress-${fileId} .percent`),
+        };
+    }
+
+    function updateUploadProgress(progress, value, label) {
+        const percent = Math.max(0, Math.min(100, Math.floor(value)));
+        if (progress.bar) progress.bar.style.width = `${percent}%`;
+        if (progress.percent) progress.percent.textContent = label || `${percent}%`;
+    }
+
+    function showUploadSuccess(file, response) {
+        const fileUrl = response.url || response.path || response.download_path;
+        if (window.Toast) Toast.show(`${file.name} 上传成功`);
+        const successHTML = `
+            <div class="card" style="padding: 16px; margin-bottom: 12px; border-left: 4px solid var(--success-color);">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <div style="overflow: hidden; margin-right: 12px;">
+                        <div style="font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${file.name}</div>
+                        <a href="${fileUrl}" target="_blank" style="font-size: 12px; color: var(--primary-color);">${fileUrl}</a>
+                    </div>
+                    <button class="btn btn-secondary btn-sm" onclick="Utils.copy('${fileUrl}')">复制</button>
+                </div>
+            </div>`;
+        if (doneArea) doneArea.insertAdjacentHTML('afterbegin', successHTML);
+    }
+
+    async function getWebUploadChunkThresholdBytes() {
+        if (window.__webUploadChunkThresholdBytes) return window.__webUploadChunkThresholdBytes;
+        try {
+            const res = await fetch('/api/app-config');
+            if (!res.ok) throw new Error('config failed');
+            const data = await res.json();
+            const mb = Number(data?.cfg?.WEB_UPLOAD_CHUNK_THRESHOLD_MB || 90);
+            const safeMb = Number.isFinite(mb) && mb > 0 ? mb : 90;
+            window.__webUploadChunkThresholdBytes = safeMb * 1024 * 1024;
+        } catch (_) {
+            window.__webUploadChunkThresholdBytes = 90 * 1024 * 1024;
+        }
+        return window.__webUploadChunkThresholdBytes;
+    }
+
+    async function uploadLargeFileInChunks(file, fileId, progress) {
+        const initRes = await fetch('/api/upload/chunk/init', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filename: file.name, filesize: file.size })
+        });
+        if (!initRes.ok) throw new Error('初始化分片上传失败');
+        const initData = await initRes.json();
+        const uploadId = initData.upload_id;
+        const chunkSize = Number(initData.chunk_size || (64 * 1024 * 1024));
+        if (!uploadId || !Number.isFinite(chunkSize) || chunkSize <= 0) throw new Error('初始化分片上传失败');
+        const totalChunks = Number(initData.total_chunks || Math.ceil(file.size / chunkSize));
+        if (!Number.isFinite(totalChunks) || totalChunks <= 0) throw new Error('初始化分片上传失败');
+
+        for (let index = 0; index < totalChunks; index += 1) {
+            const start = index * chunkSize;
+            const end = Math.min(file.size, start + chunkSize);
+            const formData = new FormData();
+            formData.append('upload_id', uploadId);
+            formData.append('index', String(index));
+            formData.append('chunk', file.slice(start, end), `${file.name}.part${index}`);
+
+            await new Promise((resolve, reject) => {
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', '/api/upload/chunk', true);
+                xhr.upload.onprogress = ({ loaded, total }) => {
+                    const uploadedBefore = start;
+                    const current = total ? loaded : 0;
+                    updateUploadProgress(progress, ((uploadedBefore + current) / file.size) * 90, `上传 ${index + 1}/${totalChunks}`);
+                };
+                xhr.onload = () => xhr.status === 200 ? resolve() : reject(new Error('分片上传失败'));
+                xhr.onerror = () => reject(new Error('网络错误'));
+                xhr.send(formData);
+            });
+        }
+
+        updateUploadProgress(progress, 92, '合并中...');
+        const completeRes = await fetch('/api/upload/chunk/complete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ upload_id: uploadId })
+        });
+        if (!completeRes.ok) throw new Error('合并上传失败');
+        updateUploadProgress(progress, 100, '100%');
+        return completeRes.json();
+    }
+
+    function uploadFile(file) {
+        return new Promise((resolve) => {
+            const fileId = `temp-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+            const progress = renderUploadProgress(file, fileId);
+
+            getWebUploadChunkThresholdBytes().then((directLimit) => {
+                if (file.size > directLimit) {
+                    uploadLargeFileInChunks(file, fileId, progress)
+                        .then((response) => showUploadSuccess(file, response))
+                        .catch((err) => {
+                            if (window.Toast) Toast.show(err.message || '上传失败', 'error');
+                        })
+                        .finally(() => {
+                            if (progress.row) progress.row.remove();
+                            resolve();
+                        });
+                    return;
+                }
+
+                uploadFileDirect(file, progress, resolve);
+            }).catch(() => {
+                uploadFileDirect(file, progress, resolve);
+            });
+        });
+    }
+
+    function uploadFileDirect(file, progress, resolve) {
+            const formData = new FormData();
+            formData.append('file', file, file.name);
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', '/api/upload', true);
+
+            xhr.upload.onprogress = ({ loaded, total }) => {
+                updateUploadProgress(progress, total ? (loaded / total) * 100 : 0);
+            };
+
+            xhr.onload = () => {
+                if (progress.row) progress.row.remove();
+                if (xhr.status === 200) {
+                    showUploadSuccess(file, JSON.parse(xhr.responseText));
+                } else {
+                    let errorMsg = "上传失败";
+                    try {
+                        const parsed = JSON.parse(xhr.responseText);
+                        const detail = parsed && parsed.detail;
+                        if (typeof detail === 'string') {
+                            errorMsg = detail;
+                        } else if (detail && typeof detail === 'object') {
+                            errorMsg = detail.message || errorMsg;
+                        } else if (parsed && parsed.message) {
+                            errorMsg = parsed.message;
+                        }
+                    } catch (e) {}
+                    if (window.Toast) Toast.show(errorMsg, 'error');
+                }
+                resolve();
+            };
+
+            xhr.onerror = () => {
+                if (progress.row) progress.row.remove();
+                if (window.Toast) Toast.show('网络错误', 'error');
+                resolve();
+            };
+
+            xhr.send(formData);
+    }
+
+    // --- Batch Actions ---
+    const selectAllCheckbox = document.getElementById('select-all-checkbox');
+    const batchDeleteBtn = document.getElementById('batch-delete-btn');
+    const copyLinksBtn = document.getElementById('copy-links-btn');
+    const moveFolderBtn = document.getElementById('move-folder-btn');
+    const saveLinkSettingsBtn = document.getElementById('save-link-settings-btn');
+    const saveFolderSettingsBtn = document.getElementById('save-folder-settings-btn');
+    const folderPathInput = document.getElementById('folder-path-input');
+    const linkVisibilityInput = document.getElementById('link-visibility-input');
+    const folderVisibilityInput = document.getElementById('folder-visibility-input');
+    const folderApplyChildrenToggle = document.getElementById('folder-apply-children-toggle');
+    const includeSubfoldersToggle = document.getElementById('include-subfolders-toggle');
+    const imageSortSelect = document.getElementById('image-sort-select');
+    const selectionCounter = document.getElementById('selection-counter');
+    const batchActionsBar = document.getElementById('batch-actions-bar');
+    const formatOptions = document.querySelectorAll('.format-option');
+
+    function updateBatchControls() {
+        const visibleCheckboxes = Array.from(document.querySelectorAll('.file-checkbox')).filter(cb => {
+            const item = cb.closest('.file-item, .image-card');
+            return item && item.style.display !== 'none';
+        });
+        const checked = Array.from(document.querySelectorAll('.file-checkbox:checked')).filter(cb => {
+            const item = cb.closest('.file-item, .image-card');
+            return item && item.style.display !== 'none';
+        });
+        const count = checked.length;
+
+        if (selectionCounter) selectionCounter.textContent = count;
+
+        if (batchActionsBar) {
+            if (count > 0) {
+                batchActionsBar.classList.remove('hidden');
+            } else {
+                batchActionsBar.classList.add('hidden');
+            }
+        }
+
+        if (selectAllCheckbox) {
+            selectAllCheckbox.checked = (count > 0 && visibleCheckboxes.length > 0 && count === visibleCheckboxes.length);
+        }
+    }
+
+    if (selectAllCheckbox) {
+        selectAllCheckbox.addEventListener('change', (e) => {
+            document.querySelectorAll('.file-checkbox').forEach(cb => {
+                const item = cb.closest('.file-item, .image-card');
+                if (item && item.style.display !== 'none') {
+                    cb.checked = e.target.checked;
+                }
+            });
+            updateBatchControls();
+        });
+    }
+
+    // Delegation for dynamic checkboxes
+    document.addEventListener('change', (e) => {
+        if (e.target.classList.contains('file-checkbox')) {
+            updateBatchControls();
+        }
+    });
+
+    // Format selection (Image Hosting)
+    if (formatOptions) {
+        formatOptions.forEach(opt => {
+            opt.addEventListener('click', () => {
+                formatOptions.forEach(o => o.classList.remove('active'));
+                opt.classList.add('active');
+            });
+        });
+    }
+
+    // Batch Copy
+    if (copyLinksBtn) {
+        copyLinksBtn.addEventListener('click', () => {
+            const checked = document.querySelectorAll('.file-checkbox:checked');
+            if (checked.length === 0) return;
+
+            const format = getActiveCopyFormat();
+
+            const links = Array.from(checked).map(cb => {
+                const item = cb.closest('.file-item, .image-card');
+                return buildCopyText(item, format);
+            });
+
+            Utils.copy(links.join('\n'));
+        });
+    }
+
+    // Batch Delete
+    if (batchDeleteBtn) {
+        batchDeleteBtn.addEventListener('click', async () => {
+            const checked = document.querySelectorAll('.file-checkbox:checked');
+            if (checked.length === 0) return;
+
+            const confirmed = await Modal.confirm('批量删除', `确定要删除选中的 ${checked.length} 个文件吗？`);
+            if (!confirmed) return;
+
+            const fileIds = Array.from(checked).map(cb => cb.dataset.fileId);
+
+            fetch('/api/batch_delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ file_ids: fileIds })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.deleted) {
+                    data.deleted.forEach(item => {
+                         const id = item.details?.file_id || item;
+                         removeFileElement(id);
+                    });
+                    if (window.Toast) Toast.show(`已删除 ${data.deleted.length} 个文件`);
+                }
+                updateBatchControls();
+            });
+        });
+    }
+
+    function getAllItems() {
+        return Array.from(document.querySelectorAll('.file-item, .image-card'));
+    }
+
+    function getCheckedItems() {
+        return Array.from(document.querySelectorAll('.file-checkbox:checked'))
+            .map(cb => cb.closest('.file-item, .image-card'))
+            .filter(Boolean);
+    }
+
+    function getScopedItems(selectedFolder, includeSubfolders) {
+        const normalized = normalizeFolderPathClient(selectedFolder);
+        return getAllItems().filter(item => itemMatchesScope(item, normalized, includeSubfolders));
+    }
+
+    if (moveFolderBtn) {
+        moveFolderBtn.addEventListener('click', async () => {
+            const checkedItems = getCheckedItems();
+            if (checkedItems.length === 0) {
+                if (window.Toast) Toast.show('请先勾选要移动的文件', 'error');
+                return;
+            }
+
+            const targetFolder = normalizeFolderPathClient((folderPathInput?.value || '').trim());
+            const targetIds = checkedItems.map(item => item.dataset.fileId);
+
+            const results = await Promise.all(targetIds.map(fileId =>
+                fetch(`/api/files/${encodeURIComponent(fileId)}/move`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ folder_path: targetFolder })
+                }).then(async res => ({ ok: res.ok, data: await res.json().catch(() => ({})), fileId }))
+            ));
+
+            let movedCount = 0;
+            results.forEach(({ ok, data, fileId }) => {
+                if (!ok) return;
+                movedCount += 1;
+                const item = document.getElementById(`file-item-${fileId.replace(/:/g, '-')}`);
+                if (item) {
+                    item.dataset.folderPath = data.folder_path || '';
+                    const folderLabel = item.querySelector('.folder-path-text');
+                    if (folderLabel) folderLabel.textContent = data.folder_path || '';
+                }
+            });
+
+            if (movedCount > 0 && window.Toast) {
+                Toast.show(`已移动 ${movedCount} 个文件`);
+            }
+            renderFolderView();
+        });
+    }
+
+    if (saveLinkSettingsBtn) {
+        saveLinkSettingsBtn.addEventListener('click', async () => {
+            const checkedItems = getCheckedItems();
+            const visibility = (linkVisibilityInput?.value || 'public').trim() === 'private' ? 'private' : 'public';
+            const includeSubfolders = !!includeSubfoldersToggle?.checked;
+            const selectedFolder = normalizeFolderPathClient((folderPathInput?.value || '').trim());
+
+            let targetItems = [];
+            if (checkedItems.length > 0) {
+                targetItems = checkedItems;
+            } else if (selectedFolder) {
+                targetItems = getScopedItems(selectedFolder, includeSubfolders);
+            }
+
+            if (targetItems.length === 0) {
+                if (window.Toast) Toast.show('请先勾选文件，或输入文件夹路径后批量设置', 'error');
+                return;
+            }
+
+            const results = await Promise.all(targetItems.map(item => {
+                const fileId = item.dataset.fileId;
+                return fetch(`/api/files/${encodeURIComponent(fileId)}/link-settings`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        link_visibility: visibility
+                    })
+                }).then(async res => ({
+                    ok: res.ok,
+                    data: await res.json().catch(() => ({})),
+                    fileId,
+                    item
+                }));
+            }));
+
+            let updatedCount = 0;
+            let failedCount = 0;
+            results.forEach(({ ok, data, item }) => {
+                if (!ok) {
+                    failedCount += 1;
+                    return;
+                }
+                updatedCount += 1;
+                updateItemLinkSettings(item, data.link_visibility || visibility);
+            });
+
+            if (updatedCount > 0 && window.Toast) {
+                Toast.show(`已更新 ${updatedCount} 个文件的可见性`);
+            }
+            if (failedCount > 0 && window.Toast) {
+                Toast.show(`${failedCount} 个文件更新失败`, 'error');
+            }
+        });
+    }
+
+    if (saveFolderSettingsBtn) {
+        saveFolderSettingsBtn.addEventListener('click', async () => {
+            if (!currentFolderPath) {
+                if (window.Toast) Toast.show('请先在左侧选择文件夹', 'error');
+                return;
+            }
+
+            const visibility = (folderVisibilityInput?.value || 'public').trim() === 'private' ? 'private' : 'public';
+            const applyToChildren = !!folderApplyChildrenToggle?.checked;
+
+            const res = await fetch('/api/folders', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    folder_path: currentFolderPath,
+                    link_visibility: visibility,
+                    apply_to_children: applyToChildren
+                })
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                if (window.Toast) Toast.show(data?.detail?.message || data?.message || '保存文件夹配置失败', 'error');
+                return;
+            }
+
+            folderSettingsMap.set(currentFolderPath, {
+                folder_path: currentFolderPath,
+                link_visibility: visibility,
+                explicit_visibility: visibility,
+                inherited_visibility: visibility,
+            });
+
+            const normalizedCurrent = `${currentFolderPath}/`;
+            getAllItems().forEach(item => {
+                const itemFolder = normalizeFolderPathClient(item.dataset.folderPath || '');
+                const hit = applyToChildren
+                    ? (itemFolder === currentFolderPath || itemFolder.startsWith(normalizedCurrent))
+                    : itemFolder === currentFolderPath;
+                if (hit) {
+                    updateItemLinkSettings(item, visibility);
+                }
+            });
+
+            renderFolderView();
+            if (window.Toast) Toast.show(`已保存文件夹配置，更新 ${data.updated_files || 0} 个文件`);
+        });
+    }
+
+    async function loadFolderSettings() {
+        if (!folderTree && !isImageHostingView()) return;
+        try {
+            const res = await fetch('/api/folders');
+            const data = await res.json().catch(() => ({}));
+            const folders = Array.isArray(data?.folders) ? data.folders : [];
+            folderSettingsMap = new Map(folders.map(folder => [normalizeFolderPathClient(folder.folder_path || ''), folder]));
+            renderFolderView();
+        } catch (_) {}
+    }
+
+    function sortImageCards() {
+        if (!imageSortSelect) return;
+        const container = document.getElementById('file-list-disk');
+        if (!container || !document.querySelector('.image-grid')) return;
+        const cards = Array.from(container.querySelectorAll('.image-card'));
+        const mode = imageSortSelect.value || 'date_desc';
+
+        const getDate = (el) => new Date(el.dataset.uploadDate || 0).getTime() || 0;
+        const getSize = (el) => Number(el.dataset.filesize || 0);
+        const getName = (el) => String(el.dataset.filename || '').toLowerCase();
+
+        cards.sort((a, b) => {
+            if (mode === 'date_asc') return getDate(a) - getDate(b);
+            if (mode === 'size_desc') return getSize(b) - getSize(a);
+            if (mode === 'size_asc') return getSize(a) - getSize(b);
+            if (mode === 'name_asc') return getName(a).localeCompare(getName(b), 'zh-CN');
+            return getDate(b) - getDate(a);
+        });
+
+        cards.forEach(card => container.appendChild(card));
+    }
+
+    if (imageSortSelect) {
+        imageSortSelect.addEventListener('change', () => {
+            sortImageCards();
+            renderFolderView();
+        });
+    }
+
+    // --- SSE & Realtime Updates ---
+    const fileListContainer = document.getElementById('file-list-disk');
+    if (fileListContainer) {
+        let eventSource = null;
+
+        const connectSSE = () => {
+            if (eventSource) {
+                eventSource.close();
+            }
+            eventSource = new EventSource('/api/file-updates');
+
+            eventSource.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+                const action = msg && msg.action ? msg.action : 'add';
+                if (action === 'delete') {
+                    removeFileElement(msg.file_id);
+                    updateBatchControls();
+                    return;
+                }
+                addNewFileElement(msg);
+            };
+
+            eventSource.onerror = () => {
+                try { eventSource.close(); } catch (_) {}
+                setTimeout(connectSSE, 5000);
+            };
+        };
+
+        connectSSE();
+    }
+
+    function formatDateValue(value) {
+        if (!value) return '';
+        const d = new Date(value);
+        if (!isNaN(d.getTime())) return d.toISOString().split('T')[0];
+        const s = String(value);
+        return s.split(' ')[0].split('T')[0];
+    }
+
+    function addNewFileElement(file) {
+        const isGridView = document.querySelector('.image-grid') !== null;
+        const container = document.getElementById('file-list-disk');
+        
+        // Remove empty state if exists
+        const emptyState = container.querySelector('div[style*="text-align: center"]');
+        if (emptyState) emptyState.remove();
+
+        const formattedSize = (file.filesize / (1024 * 1024)).toFixed(2) + " MB";
+        const formattedDate = formatDateValue(file.upload_date);
+        const safeId = file.file_id.replace(':', '-');
+        
+        // URL construction: Always use /d/{file_id} (short_id preferred)
+        // 回滚：只使用 /d/{id} 格式，不再拼接文件名或 slug
+        let fileUrl = `/d/${file.short_id || file.file_id}`;
+        const folderPath = file.folder_path || '';
+
+        let html = '';
+        const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'avif', 'heic'];
+        const isImageFile = imageExts.includes(getFileExtension(file.filename));
+        if (isGridView) {
+             html = `
+                <div class="file-item image-card" style="border: 1px solid var(--border-color); border-radius: var(--radius-md); overflow: hidden; background: var(--bg-body);" id="file-item-${safeId}" data-file-id="${file.file_id}" data-file-url="${fileUrl}" data-filename="${file.filename}" data-short-id="${file.short_id || ''}" data-folder-path="${folderPath}" data-link-visibility="${file.link_visibility || 'public'}" data-filesize="${file.filesize || 0}" data-upload-date="${file.upload_date || ''}">
+                    <div style="position: relative; aspect-ratio: 16/9; background: linear-gradient(135deg, rgba(99,102,241,0.12), rgba(59,130,246,0.08)); border-bottom: 1px solid var(--border-color);">
+                        ${isImageFile ? `<button type="button" class="preview-image-btn" style="position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; color: var(--text-primary); cursor: pointer; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;">
+                            <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
+                            <span style="font-size: 13px; color: var(--text-secondary);">点击预览</span>
+                        </button>` : `<div style="position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--text-primary);">
+                            <span class="file-type-icon" data-filename="${file.filename}" data-icon-size="34" style="display:flex; align-items:center; justify-content:center;"></span>
+                            <span style="font-size: 13px; color: var(--text-secondary);">${getFileCategory(file.filename) === 'video' ? '视频文件' : getFileCategory(file.filename) === 'archive' ? '压缩文件' : getFileCategory(file.filename) === 'code' ? '代码文件' : '文件预览不可用'}</span>
+                        </div>`}
+                        <div style="position: absolute; top: 8px; left: 8px; z-index: 1;">
+                            <input type="checkbox" class="file-checkbox" data-file-id="${file.file_id}" style="width: 16px; height: 16px; cursor: pointer;">
+                        </div>
+                    </div>
+                    <div style="padding: 12px;">
+                        <div class="text-sm font-medium" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 4px;" title="${file.filename}">${file.filename}</div>
+                        <div class="text-sm text-muted" style="margin-bottom: 12px;">${formattedSize}</div>
+                        <div style="display: flex; gap: 8px;">
+                            <button class="btn btn-secondary btn-sm copy-link-btn" style="flex: 1; height: 32px;">复制</button>
+                            <button class="btn btn-secondary btn-sm delete" style="height: 32px; color: var(--danger-color);" onclick="deleteFile('${file.file_id}')">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                            </button>
+                        </div>
+                    </div>
+                </div>`;
+        } else {
+            html = `
+                <tr class="file-item" style="border-bottom: 1px solid var(--border-color);" id="file-item-${safeId}" data-file-id="${file.file_id}" data-file-url="${fileUrl}" data-filename="${file.filename}" data-short-id="${file.short_id || ''}" data-folder-path="${folderPath}" data-link-visibility="${file.link_visibility || 'public'}">
+                    <td style="padding: 12px 16px;"><input type="checkbox" class="file-checkbox" data-file-id="${file.file_id}"></td>
+                    <td style="padding: 12px 16px;">
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span class="file-type-icon" data-filename="${file.filename}" data-icon-size="20" style="display:flex; align-items:center; justify-content:center; min-width:20px;"></span>
+                            <div style="display: flex; flex-direction: column; gap: 2px; min-width: 0;">
+                                <span class="text-sm font-medium" style="color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${file.filename}</span>
+                                <span class="text-sm text-muted folder-path-text">${folderPath}</span>
+                                <span class="text-sm text-muted link-settings-text">${file.link_visibility || 'public'}</span>
+                            </div>
+                        </div>
+                    </td>
+                    <td style="padding: 12px 16px;" class="text-sm text-muted">${formattedSize}</td>
+                    <td style="padding: 12px 16px;" class="text-sm text-muted">${formattedDate}</td>
+                    <td style="padding: 12px 16px; text-align: right;">
+                        <div style="display: flex; justify-content: flex-end; gap: 8px;">
+                            <a href="${fileUrl}" class="btn btn-ghost" style="padding: 4px 8px; height: 28px;" title="下载">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                            </a>
+                            <button class="btn btn-ghost copy-link-btn" style="padding: 4px 8px; height: 28px;" title="复制链接">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                            </button>
+                            <button class="btn btn-ghost delete" style="padding: 4px 8px; height: 28px; color: var(--danger-color);" onclick="deleteFile('${file.file_id}')" title="删除">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                            </button>
+                        </div>
+                    </td>
+                </tr>`;
+        }
+
+        container.insertAdjacentHTML('afterbegin', html);
+        hydrateFileIcons(container);
+        sortImageCards();
+        renderFolderView();
+    }
+
+    hydrateFileIcons(document);
+    loadFolderSettings();
+    sortImageCards();
+    renderFolderView();
+
+    // --- Global Helpers ---
+    window.deleteFile = async (fileId) => {
+        const confirmed = await Modal.confirm('删除文件', '确定要删除此文件吗？');
+        if (!confirmed) return;
+        fetch(`/api/files/${fileId}`, { method: 'DELETE' })
+            .then(async (res) => {
+                let data = null;
+                try { data = await res.json(); } catch (e) {}
+                return { ok: res.ok, data };
+            })
+            .then(({ ok, data }) => {
+                if (ok && data && data.status === 'ok') {
+                    removeFileElement(fileId);
+                    if (window.Toast) Toast.show('文件已删除');
+                    updateBatchControls();
+                } else {
+                    const msg = data?.detail?.message || data?.message || '删除失败';
+                    if (window.Toast) Toast.show(msg, 'error');
+                }
+            });
+    };
+
+    function removeFileElement(fileId) {
+        const el = document.getElementById(`file-item-${fileId.replace(':', '-')}`);
+        if (el) el.remove();
+        
+        // Check if empty
+        const container = document.getElementById('file-list-disk');
+        if (container && container.children.length === 0) {
+            // Re-render empty state logic if needed, or let user refresh
+            // Simple text fallback
+            const isGridView = document.querySelector('.image-grid') !== null;
+            if (isGridView) {
+                 container.innerHTML = `
+                    <div style="grid-column: 1/-1; padding: 40px; text-align: center; color: var(--text-tertiary);">
+                        <p>暂无图片</p>
+                    </div>`;
+            } else {
+                 container.innerHTML = `
+                    <tr>
+                        <td colspan="5" style="padding: 48px; text-align: center;">
+                            <div class="text-muted">暂无文件</div>
+                        </td>
+                    </tr>`;
+            }
+        }
+    }
+});
