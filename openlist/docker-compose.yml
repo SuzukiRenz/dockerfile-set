@@ -1,0 +1,25 @@
+version: '3.3'
+services:
+  openlist:
+    restart: always
+    volumes:
+      - '/etc/openlist:/opt/openlist/data'
+    ports:
+      - '5244:5244'
+      - '5246:5246'
+    environment:
+      - PUID=0
+      - PGID=0
+      - UMASK=022
+      - TZ=UTC
+      - RUN_ARIA2=true
+      - S3_ENABLE=true
+      - S3_PORT=5246
+      #- NEZHA_SERVER=
+      #- NEZHA_PORT=
+      #- NEZHA_KEY=
+      #- NEZHA_ARGS=
+    container_name: openlist
+    build:
+      context: .
+      dockerfile: Dockerfile
