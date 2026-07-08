@@ -7,14 +7,6 @@ use tokio::net::TcpListener;
 use tower_http::services::ServeDir;
 use tracing_subscriber::EnvFilter;
 
-// See the comment on the `tikv-jemallocator` dependency in Cargo.toml: this
-// swaps glibc's malloc for jemalloc so freed memory from large transient
-// buffers (upload/download chunks) is actually returned to the OS instead
-// of keeping the process's RSS pinned at its peak.
-#[cfg(all(not(target_env = "msvc"), not(target_os = "windows")))]
-#[global_allocator]
-static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-
 mod auth;
 mod config;
 mod constants;
@@ -91,6 +83,21 @@ async fn main() {
         }
     });
 
+    // glibc's malloc keeps freed heap pages mapped instead of returning them
+    // to the OS, so after any large transient allocation (a Telegram upload
+    // chunk, a decoded backup, ...) the process's RSS plateaus at that peak
+    // and doesn't come back down on its own even though the memory is
+    // logically free. `malloc_trim` explicitly asks glibc to release
+    // whatever it can; running it periodically on a low-traffic self-hosted
+    // instance keeps steady-state RSS close to what's actually in use.
+    tokio::spawn(async {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            trim_memory();
+        }
+    });
+
     let app = Router::new()
         .merge(routes::build_router(state.clone()))
         .nest_service("/static", ServeDir::new("app/static"))
@@ -127,6 +134,21 @@ async fn shutdown_signal(state: Arc<AppState>) {
     tracing::info!("收到关闭信号");
     state::stop_bot(&state).await;
 }
+
+/// Ask glibc to release freed heap pages back to the OS. `malloc_trim` is a
+/// glibc extension (not part of POSIX), so this is a no-op on anything else
+/// (musl, macOS, etc.) - harmless there, since those allocators generally
+/// don't exhibit the same "RSS never comes back down" behaviour to begin
+/// with.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn trim_memory() {
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn trim_memory() {}
 
 fn tera_url_for(
     args: &std::collections::HashMap<String, tera::Value>,

@@ -59,14 +59,10 @@ bytes = "1"
 base64 = "0.22"
 flate2 = "1"
 
-# Allocator: glibc's malloc keeps freed heap arenas mapped instead of handing
-# them back to the OS, so after any large transient allocation (a ~19.5MB
-# Telegram upload chunk, a decoded backup, etc.) the process's RSS plateaus
-# at that peak and never comes back down even though the memory is logically
-# free. jemalloc purges dirty pages back to the OS much more aggressively,
-# which is the main lever for keeping steady-state RSS low on a small VPS.
-[target.'cfg(all(not(target_env = "msvc"), not(target_os = "windows")))'.dependencies]
-tikv-jemallocator = "0.6"
+# Periodically hands freed heap pages back to the OS (see main.rs). Pure FFI
+# binding to the system libc that's already present in the runtime image -
+# no C toolchain / `make` required at build time, unlike jemalloc.
+libc = "0.2"
 
 [profile.release]
 opt-level = 3
