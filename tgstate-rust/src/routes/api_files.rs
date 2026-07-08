@@ -1,0 +1,818 @@
+use std::sync::Arc;
+
+use axum::body::Body;
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{delete, get, post};
+use axum::{Json, Router};
+use futures::StreamExt;
+use serde::Deserialize;
+
+use crate::config;
+use crate::database;
+use crate::error::http_error;
+use crate::state::AppState;
+use crate::telegram::service::TelegramService;
+
+#[derive(Deserialize)]
+pub struct DownloadQuery {
+    download: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct BatchDeleteRequest {
+    file_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct MoveFileRequest {
+    folder_path: String,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateLinkSettingsRequest {
+    link_visibility: String,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateFolderSettingsRequest {
+    folder_path: String,
+    link_visibility: String,
+    apply_to_children: Option<bool>,
+}
+
+fn get_telegram_service(state: &AppState) -> Result<TelegramService, impl IntoResponse> {
+    let app_settings = config::get_app_settings(&state.settings, &state.db_pool);
+    let token = app_settings
+        .get("BOT_TOKEN")
+        .and_then(|v| v.as_deref())
+        .unwrap_or("")
+        .to_string();
+    let channel = app_settings
+        .get("CHANNEL_NAME")
+        .and_then(|v| v.as_deref())
+        .unwrap_or("")
+        .to_string();
+
+    if token.is_empty() || channel.is_empty() {
+        return Err(http_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Bot 未配置",
+            "bot_not_configured",
+        ));
+    }
+
+    Ok(TelegramService::new(
+        token,
+        channel,
+        state.http_client.clone(),
+    ))
+}
+
+fn guess_content_type(filename: &str) -> String {
+    let mime = mime_guess::from_path(filename).first_or_octet_stream();
+    let mime_str = mime.to_string();
+
+    if mime_str.starts_with("text/") && !mime_str.contains("charset") {
+        format!("{}; charset=utf-8", mime_str)
+    } else {
+        mime_str
+    }
+}
+
+fn content_disposition(filename: &str, force_download: bool) -> String {
+    let preview_extensions = [
+        "jpg", "jpeg", "png", "gif", "webp", "bmp", "ico", "tiff", "mp4", "webm", "ogg", "mp3",
+        "wav", "flac", "pdf", "txt", "json", "csv", "md", "log",
+    ];
+
+    let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
+    let is_inline = !force_download && preview_extensions.contains(&ext.as_str());
+    let encoded_name =
+        percent_encoding::utf8_percent_encode(filename, percent_encoding::NON_ALPHANUMERIC)
+            .to_string();
+
+    if is_inline {
+        format!("inline; filename*=UTF-8''{}", encoded_name)
+    } else {
+        format!("attachment; filename*=UTF-8''{}", encoded_name)
+    }
+}
+
+fn chunk_download_failed_response(chunk_id: &str) -> Response {
+    tracing::error!("chunk download failed: {}", chunk_id);
+    http_error(
+        StatusCode::BAD_GATEWAY,
+        "文件下载失败",
+        "chunk_download_failed",
+    )
+    .into_response()
+}
+
+fn extract_session_cookie(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cookies| {
+            cookies.split(';').find_map(|c| {
+                let c = c.trim();
+                c.strip_prefix(&format!("{}=", crate::auth::COOKIE_NAME))
+                    .map(|v| v.to_string())
+            })
+        })
+}
+
+fn check_link_access(
+    state: &AppState,
+    meta: &database::FileMetadata,
+    headers: &HeaderMap,
+) -> Option<Response> {
+    if meta.link_visibility == "private" {
+        let cookie = extract_session_cookie(headers);
+        let active_pwd = config::get_active_password(&state.settings, &state.db_pool);
+        let app_settings = config::get_app_settings(&state.settings, &state.db_pool);
+        let session_token = app_settings.get("SESSION_TOKEN").and_then(|v| v.clone());
+        let authorized = match (
+            cookie.as_deref(),
+            active_pwd.as_deref(),
+            session_token.as_deref(),
+        ) {
+            (Some(c), Some(p), Some(t)) if !p.is_empty() && !t.is_empty() => {
+                crate::auth::secure_compare(c, t)
+            }
+            _ => false,
+        };
+        if !authorized {
+            return Some(
+                http_error(StatusCode::NOT_FOUND, "文件未找到", "not_found").into_response(),
+            );
+        }
+    }
+
+    None
+}
+
+async fn serve_telegram_file(
+    state: &AppState,
+    tg_service: &TelegramService,
+    file_id: &str,
+    filename: &str,
+    headers: &HeaderMap,
+    force_download: bool,
+    is_head: bool,
+) -> Response {
+    let real_file_id = if let Some(pos) = file_id.find(':') {
+        &file_id[pos + 1..]
+    } else {
+        file_id
+    };
+
+    let download_url = match tg_service.get_download_url(real_file_id).await {
+        Ok(Some(url)) => url,
+        Ok(None) => {
+            return http_error(StatusCode::NOT_FOUND, "文件未找到或链接已过期", "not_found")
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!("获取下载链接失败: {}", e);
+            return http_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "无法连接到 Telegram",
+                "tg_error",
+            )
+            .into_response();
+        }
+    };
+
+    let client = &state.http_client;
+
+    let peek_resp = match client
+        .get(&download_url)
+        .header("Range", "bytes=0-127")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("下载失败: {}", e);
+            return http_error(StatusCode::BAD_GATEWAY, "无法下载文件", "download_error")
+                .into_response();
+        }
+    };
+
+    let peek_bytes = match peek_resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!("读取文件失败: {}", e);
+            return http_error(StatusCode::BAD_GATEWAY, "读取文件失败", "read_error")
+                .into_response();
+        }
+    };
+
+    if peek_bytes.starts_with(b"tgstate-blob\n") {
+        let full_resp = match client.get(&download_url).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("下载清单失败: {}", e);
+                return http_error(StatusCode::BAD_GATEWAY, "下载文件失败", "download_error")
+                    .into_response();
+            }
+        };
+        let manifest_bytes = match full_resp.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!("读取清单失败: {}", e);
+                return http_error(StatusCode::BAD_GATEWAY, "读取文件失败", "read_error")
+                    .into_response();
+            }
+        };
+
+        let manifest_str = String::from_utf8_lossy(&manifest_bytes);
+        let lines: Vec<&str> = manifest_str.lines().collect();
+        if lines.len() < 3 {
+            return http_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "清单文件格式错误",
+                "manifest_error",
+            )
+            .into_response();
+        }
+
+        let original_filename = lines[1];
+        let chunk_ids: Vec<String> = lines[2..].iter().map(|s| s.to_string()).collect();
+
+        let ct = guess_content_type(original_filename);
+        let cd = content_disposition(original_filename, force_download);
+
+        if is_head {
+            return Response::builder()
+                .header("Content-Type", ct)
+                .header("Content-Disposition", cd)
+                .header("Accept-Ranges", "bytes")
+                .header("X-Content-Type-Options", "nosniff")
+                .body(Body::empty())
+                .unwrap();
+        }
+
+        let mut chunk_urls = Vec::with_capacity(chunk_ids.len());
+        for chunk_composite in &chunk_ids {
+            let real_id = if let Some(pos) = chunk_composite.find(':') {
+                chunk_composite[pos + 1..].to_string()
+            } else {
+                chunk_composite.clone()
+            };
+
+            let url = match tg_service.get_download_url(&real_id).await {
+                Ok(Some(u)) => u,
+                _ => return chunk_download_failed_response(chunk_composite),
+            };
+            chunk_urls.push((chunk_composite.clone(), url));
+        }
+
+        let tg = tg_service.clone();
+        let http = client.clone();
+        let stream = async_stream::stream! {
+            for (chunk_composite, url) in chunk_urls {
+                let resp = match http.get(&url).send().await {
+                    Ok(r) if r.status().is_success() => r,
+                    _ => {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        let real_id = if let Some(pos) = chunk_composite.find(':') {
+                            chunk_composite[pos + 1..].to_string()
+                        } else {
+                            chunk_composite.clone()
+                        };
+                        let retry_url = match tg.get_download_url(&real_id).await {
+                            Ok(Some(u)) => u,
+                            _ => {
+                                yield Err::<bytes::Bytes, std::io::Error>(std::io::Error::other(format!(
+                                    "Failed to refresh chunk URL: {}",
+                                    chunk_composite
+                                )));
+                                return;
+                            }
+                        };
+                        match http.get(&retry_url).send().await {
+                            Ok(r) if r.status().is_success() => r,
+                            _ => {
+                                yield Err::<bytes::Bytes, std::io::Error>(std::io::Error::other(format!(
+                                    "Chunk download retry failed: {}",
+                                    chunk_composite
+                                )));
+                                return;
+                            }
+                        }
+                    }
+                };
+
+                let mut stream = resp.bytes_stream();
+                while let Some(chunk) = stream.next().await {
+                    match chunk {
+                        Ok(bytes) => yield Ok::<_, std::io::Error>(bytes),
+                        Err(e) => {
+                            yield Err::<bytes::Bytes, std::io::Error>(std::io::Error::other(format!(
+                                "Chunk stream error for {}: {}",
+                                chunk_composite, e
+                            )));
+                            return;
+                        }
+                    }
+                }
+            }
+        };
+
+        return Response::builder()
+            .header("Content-Type", ct)
+            .header("Content-Disposition", cd)
+            .header("Accept-Ranges", "bytes")
+            .header("X-Content-Type-Options", "nosniff")
+            .body(Body::from_stream(stream))
+            .unwrap();
+    }
+
+    let ct = guess_content_type(filename);
+    let cd = content_disposition(filename, force_download);
+
+    if let Some(range_header) = headers.get("range").and_then(|v| v.to_str().ok()) {
+        let range_resp = match client
+            .get(&download_url)
+            .header("Range", range_header)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("Range 请求失败: {}", e);
+                return http_error(StatusCode::BAD_GATEWAY, "无法下载文件", "download_error")
+                    .into_response();
+            }
+        };
+
+        let status = range_resp.status();
+        let mut builder = Response::builder()
+            .status(status)
+            .header("Content-Type", &ct)
+            .header("Content-Disposition", &cd)
+            .header("Accept-Ranges", "bytes")
+            .header("X-Content-Type-Options", "nosniff");
+
+        if let Some(cr) = range_resp.headers().get("content-range") {
+            builder = builder.header("Content-Range", cr);
+        }
+        if let Some(cl) = range_resp.headers().get("content-length") {
+            builder = builder.header("Content-Length", cl);
+        }
+
+        let stream = range_resp.bytes_stream();
+        return builder
+            .body(Body::from_stream(
+                stream.map(|r| r.map_err(std::io::Error::other)),
+            ))
+            .unwrap();
+    }
+
+    let full_resp = match client.get(&download_url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("下载失败: {}", e);
+            return http_error(StatusCode::BAD_GATEWAY, "无法下载文件", "download_error")
+                .into_response();
+        }
+    };
+
+    let mut builder = Response::builder()
+        .header("Content-Type", ct)
+        .header("Content-Disposition", cd)
+        .header("Accept-Ranges", "bytes")
+        .header("X-Content-Type-Options", "nosniff");
+
+    if let Some(cl) = full_resp.headers().get("content-length") {
+        builder = builder.header("Content-Length", cl);
+    }
+
+    if is_head {
+        return builder.body(Body::empty()).unwrap();
+    }
+
+    let stream = full_resp.bytes_stream();
+    builder
+        .body(Body::from_stream(
+            stream.map(|r| r.map_err(std::io::Error::other)),
+        ))
+        .unwrap()
+}
+
+pub(crate) async fn serve_file(
+    state: &AppState,
+    meta: &database::FileMetadata,
+    headers: &HeaderMap,
+    force_download: bool,
+    is_head: bool,
+) -> Response {
+    let tg_service = match get_telegram_service(state) {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
+    serve_telegram_file(
+        state,
+        &tg_service,
+        &meta.file_id,
+        &meta.filename,
+        headers,
+        force_download,
+        is_head,
+    )
+    .await
+}
+
+async fn download_file_short(
+    State(state): State<Arc<AppState>>,
+    Path(identifier): Path<String>,
+    Query(query): Query<DownloadQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if identifier.is_empty()
+        || identifier.len() > 128
+        || identifier.chars().any(|c| c.is_control() || c == '\0')
+    {
+        return http_error(StatusCode::BAD_REQUEST, "无效的文件标识", "invalid_id").into_response();
+    }
+
+    let meta = database::get_file_by_id(&state.db_pool, &identifier);
+    match meta {
+        Ok(Some(f)) => {
+            if let Some(resp) = check_link_access(&state, &f, &headers) {
+                return resp;
+            }
+            let force_download = query
+                .download
+                .as_deref()
+                .map_or(false, |v| v == "1" || v == "true");
+            serve_file(&state, &f, &headers, force_download, false).await
+        }
+        _ => http_error(StatusCode::NOT_FOUND, "文件未找到", "not_found").into_response(),
+    }
+}
+
+async fn download_file_short_head(
+    State(state): State<Arc<AppState>>,
+    Path(identifier): Path<String>,
+    Query(query): Query<DownloadQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let meta = database::get_file_by_id(&state.db_pool, &identifier);
+    match meta {
+        Ok(Some(f)) => {
+            if let Some(resp) = check_link_access(&state, &f, &headers) {
+                return resp;
+            }
+            let force_download = query
+                .download
+                .as_deref()
+                .map_or(false, |v| v == "1" || v == "true");
+            serve_file(&state, &f, &headers, force_download, true).await
+        }
+        _ => http_error(StatusCode::NOT_FOUND, "文件未找到", "not_found").into_response(),
+    }
+}
+
+async fn download_file_legacy(
+    State(state): State<Arc<AppState>>,
+    Path((file_id, filename)): Path<(String, String)>,
+    Query(query): Query<DownloadQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let meta = match database::get_file_by_id(&state.db_pool, &file_id) {
+        Ok(Some(meta)) => meta,
+        _ => database::FileMetadata {
+            filename,
+            file_id,
+            filesize: 0,
+            upload_date: String::new(),
+            short_id: None,
+            storage_backend: crate::constants::STORAGE_BACKEND_TELEGRAM.to_string(),
+            storage_path: None,
+            folder_path: String::new(),
+            link_visibility: "public".to_string(),
+            expires_at: None,
+        },
+    };
+    if let Some(resp) = check_link_access(&state, &meta, &headers) {
+        return resp;
+    }
+    let force_download = query
+        .download
+        .as_deref()
+        .map_or(false, |v| v == "1" || v == "true");
+    serve_file(&state, &meta, &headers, force_download, false).await
+}
+
+async fn download_file_legacy_head(
+    State(state): State<Arc<AppState>>,
+    Path((file_id, filename)): Path<(String, String)>,
+    Query(query): Query<DownloadQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let meta = match database::get_file_by_id(&state.db_pool, &file_id) {
+        Ok(Some(meta)) => meta,
+        _ => database::FileMetadata {
+            filename,
+            file_id,
+            filesize: 0,
+            upload_date: String::new(),
+            short_id: None,
+            storage_backend: crate::constants::STORAGE_BACKEND_TELEGRAM.to_string(),
+            storage_path: None,
+            folder_path: String::new(),
+            link_visibility: "public".to_string(),
+            expires_at: None,
+        },
+    };
+    if let Some(resp) = check_link_access(&state, &meta, &headers) {
+        return resp;
+    }
+    let force_download = query
+        .download
+        .as_deref()
+        .map_or(false, |v| v == "1" || v == "true");
+    serve_file(&state, &meta, &headers, force_download, true).await
+}
+
+async fn get_files_list(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let files = database::get_all_files(&state.db_pool).unwrap_or_default();
+    Json(files)
+}
+
+async fn get_folders_list(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let folders = database::list_folder_paths(&state.db_pool).unwrap_or_default();
+    let settings = database::list_folder_settings(&state.db_pool).unwrap_or_default();
+    let folder_items = folders
+        .into_iter()
+        .map(|folder_path| {
+            let inherited_visibility =
+                database::get_folder_visibility(&state.db_pool, &folder_path)
+                    .unwrap_or_else(|_| "public".to_string());
+            let explicit_visibility = settings
+                .iter()
+                .find(|item| item.folder_path == folder_path)
+                .map(|item| item.link_visibility.clone());
+            let link_visibility = explicit_visibility
+                .clone()
+                .unwrap_or_else(|| inherited_visibility.clone());
+            serde_json::json!({
+                "folder_path": folder_path,
+                "link_visibility": link_visibility,
+                "explicit_visibility": explicit_visibility,
+                "inherited_visibility": inherited_visibility,
+            })
+        })
+        .collect::<Vec<_>>();
+    Json(serde_json::json!({ "folders": folder_items }))
+}
+
+async fn move_file(
+    State(state): State<Arc<AppState>>,
+    Path(file_id): Path<String>,
+    Json(payload): Json<MoveFileRequest>,
+) -> impl IntoResponse {
+    let normalized = database::normalize_folder_path(&payload.folder_path);
+    match database::update_file_folder(&state.db_pool, &file_id, &normalized) {
+        Ok(true) => {
+            let meta = database::get_file_by_id(&state.db_pool, &file_id)
+                .ok()
+                .flatten();
+            let event = crate::events::build_file_event(
+                "move",
+                &file_id,
+                meta.as_ref().map(|m| m.filename.as_str()),
+                meta.as_ref().map(|m| m.filesize),
+                meta.as_ref().map(|m| m.upload_date.as_str()),
+                meta.as_ref().and_then(|m| m.short_id.as_deref()),
+                Some(normalized.as_str()),
+            );
+            state
+                .event_bus
+                .publish(serde_json::to_string(&event).unwrap_or_default());
+            Json(serde_json::json!({ "status": "ok", "folder_path": normalized })).into_response()
+        }
+        Ok(false) => http_error(StatusCode::NOT_FOUND, "文件不存在", "not_found").into_response(),
+        Err(e) => crate::error::AppError::from(e).into_response(),
+    }
+}
+
+async fn update_link_settings(
+    State(state): State<Arc<AppState>>,
+    Path(file_id): Path<String>,
+    Json(payload): Json<UpdateLinkSettingsRequest>,
+) -> impl IntoResponse {
+    let visibility = match payload.link_visibility.trim() {
+        "private" => "private",
+        _ => "public",
+    };
+
+    match database::update_file_link_settings(&state.db_pool, &file_id, visibility, None) {
+        Ok(true) => Json(serde_json::json!({
+            "status": "ok",
+            "link_visibility": visibility,
+        }))
+        .into_response(),
+        Ok(false) => http_error(StatusCode::NOT_FOUND, "文件不存在", "not_found").into_response(),
+        Err(e) => crate::error::AppError::from(e).into_response(),
+    }
+}
+
+async fn update_folder_settings(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<UpdateFolderSettingsRequest>,
+) -> impl IntoResponse {
+    let normalized = database::normalize_folder_path(&payload.folder_path);
+    if normalized.is_empty() {
+        return http_error(
+            StatusCode::BAD_REQUEST,
+            "文件夹路径不能为空",
+            "invalid_folder_path",
+        )
+        .into_response();
+    }
+
+    let visibility = match payload.link_visibility.trim() {
+        "private" => "private",
+        _ => "public",
+    };
+    let apply_to_children = payload.apply_to_children.unwrap_or(true);
+
+    match database::set_folder_visibility(
+        &state.db_pool,
+        &normalized,
+        visibility,
+        apply_to_children,
+    ) {
+        Ok(updated_files) => Json(serde_json::json!({
+            "status": "ok",
+            "folder_path": normalized,
+            "link_visibility": visibility,
+            "apply_to_children": apply_to_children,
+            "updated_files": updated_files,
+        }))
+        .into_response(),
+        Err(e) => crate::error::AppError::from(e).into_response(),
+    }
+}
+
+async fn delete_file(
+    State(state): State<Arc<AppState>>,
+    Path(file_id): Path<String>,
+) -> impl IntoResponse {
+    let meta = match database::get_file_by_id(&state.db_pool, &file_id) {
+        Ok(Some(m)) => m,
+        _ => {
+            return http_error(StatusCode::NOT_FOUND, "文件不存在", "not_found").into_response();
+        }
+    };
+
+    let tg_service = match get_telegram_service(&state) {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
+
+    tracing::info!("正在删除文件: {}", file_id);
+    let result = tg_service.delete_file_with_chunks(&meta.file_id).await;
+
+    if result.main_message_deleted {
+        let db_deleted =
+            database::delete_file_metadata(&state.db_pool, &meta.file_id).unwrap_or(false);
+        let db_status = if db_deleted {
+            "deleted"
+        } else {
+            "not_found_in_db"
+        };
+
+        if result.failed_chunks.is_empty() {
+            return Json(serde_json::json!({
+                "status": "ok",
+                "message": format!("文件 {} 已删除。", file_id),
+                "details": {"db": db_status, "tg": result}
+            }))
+            .into_response();
+        } else {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "code": "partial_failure",
+                    "message": "部分分块删除失败",
+                    "details": result,
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    let force_deleted =
+        database::delete_file_metadata(&state.db_pool, &meta.file_id).unwrap_or(false);
+    if force_deleted {
+        return Json(serde_json::json!({
+            "status": "ok",
+            "message": format!("文件 {} 已从数据库删除（Telegram 删除失败）。", file_id),
+            "details": result,
+        }))
+        .into_response();
+    }
+
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "status": "error",
+            "code": "delete_failed",
+            "message": "删除失败",
+            "details": result,
+        })),
+    )
+        .into_response()
+}
+
+async fn batch_delete_files(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<BatchDeleteRequest>,
+) -> impl IntoResponse {
+    if payload.file_ids.len() > crate::constants::BATCH_DELETE_MAX {
+        return http_error(
+            StatusCode::BAD_REQUEST,
+            "批量删除数量超过上限",
+            "too_many_items",
+        )
+        .into_response();
+    }
+
+    let mut deleted = Vec::new();
+    let mut failed = Vec::new();
+
+    for fid in &payload.file_ids {
+        let meta = match database::get_file_by_id(&state.db_pool, fid) {
+            Ok(Some(m)) => m,
+            _ => {
+                failed.push(fid.clone());
+                continue;
+            }
+        };
+
+        let tg_service = match get_telegram_service(&state) {
+            Ok(s) => s,
+            Err(e) => return e.into_response(),
+        };
+
+        let result = tg_service.delete_file_with_chunks(&meta.file_id).await;
+        if result.main_message_deleted {
+            database::delete_file_metadata(&state.db_pool, &meta.file_id).ok();
+            deleted.push(fid.clone());
+        } else if database::delete_file_metadata(&state.db_pool, &meta.file_id).unwrap_or(false) {
+            deleted.push(fid.clone());
+        } else {
+            failed.push(fid.clone());
+        }
+    }
+
+    Json(serde_json::json!({
+        "status": "completed",
+        "deleted": deleted,
+        "failed": failed,
+    }))
+    .into_response()
+}
+
+pub fn router() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/files", get(get_files_list))
+        .route("/api/files/:file_id", delete(delete_file))
+        .route("/api/files/:file_id/move", post(move_file))
+        .route(
+            "/api/files/:file_id/link-settings",
+            post(update_link_settings),
+        )
+        .route(
+            "/api/folders",
+            get(get_folders_list).post(update_folder_settings),
+        )
+        .route("/api/batch_delete", post(batch_delete_files))
+        .route(
+            "/d/:file_id/:filename",
+            get(download_file_legacy).head(download_file_legacy_head),
+        )
+        .route(
+            "/d/:identifier",
+            get(download_file_short).head(download_file_short_head),
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chunk_download_failed_response;
+    use axum::http::StatusCode;
+
+    #[test]
+    fn manifest_chunk_failure_returns_bad_gateway() {
+        let response = chunk_download_failed_response("chunk-1");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+}

@@ -1,0 +1,74 @@
+[package]
+name = "tgstate"
+version = "2.0.7"
+edition = "2021"
+description = "A Telegram-based private file storage system"
+rust-version = "1.88"
+
+[dependencies]
+# Web framework
+axum = { version = "0.7", features = ["multipart"] }
+tokio = { version = "1", features = ["full"] }
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.5", features = ["fs", "trace"] }
+
+# Templating
+tera = "1"
+
+# Database
+rusqlite = { version = "0.31", features = ["bundled", "backup"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.24"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["stream", "multipart", "json"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Env
+dotenvy = "0.15"
+
+# Crypto
+# `hex` is still used by `auth::generate_session_token` to encode the
+# 32 random bytes as a 64-char hex session ID. `sha2` was previously used
+# to derive a sha256(password) cookie; that scheme has been removed in
+# favour of a random session token stored in SQLite, so `sha2` is no
+# longer a direct dependency.
+hex = "0.4"
+argon2 = "0.5"
+
+# Error handling
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+rand = "0.8"
+mime_guess = "2"
+percent-encoding = "2"
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["io"] }
+futures = "0.3"
+async-stream = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
+bytes = "1"
+base64 = "0.22"
+flate2 = "1"
+
+# Allocator: glibc's malloc keeps freed heap arenas mapped instead of handing
+# them back to the OS, so after any large transient allocation (a ~19.5MB
+# Telegram upload chunk, a decoded backup, etc.) the process's RSS plateaus
+# at that peak and never comes back down even though the memory is logically
+# free. jemalloc purges dirty pages back to the OS much more aggressively,
+# which is the main lever for keeping steady-state RSS low on a small VPS.
+[target.'cfg(all(not(target_env = "msvc"), not(target_os = "windows")))'.dependencies]
+tikv-jemallocator = "0.6"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
