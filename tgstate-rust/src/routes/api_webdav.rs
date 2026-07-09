@@ -429,7 +429,7 @@ async fn move_entry(state: Arc<AppState>, source_identifier: String, headers: He
     let overwrite_allowed = header_overwrite_allowed(&headers);
 
     // Case 1: source is a single file.
-    if let Some(_source_file) = lookup_file(&state, &source_normalized) {
+    if let Some(source_file) = lookup_file(&state, &source_normalized) {
         let dest_parts = split_webdav_path(&dest_normalized);
         let Some(raw_dest_name) = dest_parts.last() else {
             return http_error(StatusCode::BAD_REQUEST, "invalid destination", "invalid_destination")
@@ -465,7 +465,16 @@ async fn move_entry(state: Arc<AppState>, source_identifier: String, headers: He
             }
         }
 
-        return match database::rename_file(&state.db_pool, &source_normalized, &dest_folder, &dest_filename) {
+        // `lookup_file` resolves by short_id, by file_id, by full webdav
+        // path (folder_path + filename), or by bare filename - which is how
+        // WebDAV clients actually address resources, since they have no
+        // concept of our internal short_id. `rename_file` itself only
+        // matches rows by short_id/file_id, so we must key the UPDATE off
+        // `source_file.file_id` (always present) rather than the raw
+        // path-based identifier the client sent - otherwise the UPDATE
+        // matches zero rows and this incorrectly reports 404.
+        let source_key = source_file.file_id.clone();
+        return match database::rename_file(&state.db_pool, &source_key, &dest_folder, &dest_filename) {
             Ok(true) => {
                 if target_existed {
                     StatusCode::NO_CONTENT.into_response()

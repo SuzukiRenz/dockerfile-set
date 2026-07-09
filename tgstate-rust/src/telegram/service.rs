@@ -141,21 +141,30 @@ impl TelegramService {
             .await
         {
             Ok(resp) => {
+                let status = resp.status();
                 let data: serde_json::Value = resp.json().await.unwrap_or_default();
                 if data["ok"].as_bool() == Some(true) {
                     (true, "deleted".into())
                 } else {
-                    let desc = data["description"].as_str().unwrap_or("");
-                    if desc.contains("not found") {
+                    let desc = data["description"].as_str().unwrap_or("<no description>");
+                    let error_code = data["error_code"].as_i64();
+                    tracing::error!(
+                        "deleteMessage({}) rejected by Telegram: http_status={} error_code={:?} description={:?}",
+                        message_id,
+                        status,
+                        error_code,
+                        desc
+                    );
+                    if desc.contains("not found") || desc.contains("message to delete not found") {
                         (true, "not_found".into())
                     } else {
-                        (false, "error".into())
+                        (false, format!("telegram_error: {}", desc))
                     }
                 }
             }
             Err(e) => {
-                tracing::error!("deleteMessage failed: {}", e);
-                (false, "error".into())
+                tracing::error!("deleteMessage({}) network/transport failure: {}", message_id, e);
+                (false, format!("transport_error: {}", e))
             }
         }
     }
