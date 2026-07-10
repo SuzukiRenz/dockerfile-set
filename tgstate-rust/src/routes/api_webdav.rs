@@ -177,42 +177,57 @@ fn file_virtual_path(file: &database::FileMetadata) -> String {
     }
 }
 
-fn webdav_timestamp(value: &str) -> String {
+/// Parse whatever format `upload_date` happens to be stored in. Falls back
+/// to "now" for anything unparseable rather than handing an invalid string
+/// to the client - that's what was causing some WebDAV clients to fall back
+/// to displaying the Unix epoch (1970-01-01) as the modified date.
+fn parse_stored_timestamp(value: &str) -> chrono::DateTime<chrono::Utc> {
     let raw = value.trim();
     if raw.is_empty() {
-        return chrono::Utc::now().to_rfc2822();
+        return chrono::Utc::now();
     }
-
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
-        return dt.with_timezone(&chrono::Utc).to_rfc2822();
+        return dt.with_timezone(&chrono::Utc);
     }
-
     if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S") {
-        return chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(ndt, chrono::Utc)
-            .to_rfc2822();
+        return chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(ndt, chrono::Utc);
     }
-
     if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S") {
-        return chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(ndt, chrono::Utc)
-            .to_rfc2822();
+        return chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(ndt, chrono::Utc);
     }
-
-    raw.to_string()
+    chrono::Utc::now()
 }
 
-fn collection_timestamp() -> String {
-    chrono::Utc::now().to_rfc2822()
+/// `<d:getlastmodified>` is specified (RFC 4918 / RFC 2068) to use the HTTP
+/// `Date` header format, i.e. RFC 1123 with a literal `GMT` suffix - e.g.
+/// `Wed, 09 Jul 2026 10:00:00 GMT`. `chrono`'s `to_rfc2822()` instead emits a
+/// numeric offset (`+0000`) and doesn't zero-pad single-digit days, which
+/// several WebDAV clients (including openlist's Go-based parser) fail to
+/// parse - silently falling back to the zero value, which renders as
+/// 1970-01-01. Format it by hand to stay spec-compliant.
+fn http_date(dt: &chrono::DateTime<chrono::Utc>) -> String {
+    dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string()
+}
+
+/// `<d:creationdate>` should be ISO 8601.
+fn iso8601_date(dt: &chrono::DateTime<chrono::Utc>) -> String {
+    dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+fn collection_timestamps() -> (String, String) {
+    let now = chrono::Utc::now();
+    (iso8601_date(&now), http_date(&now))
 }
 
 fn file_item_from_meta(file: database::FileMetadata) -> WebDavListItem {
-    let timestamp = webdav_timestamp(&file.upload_date);
+    let dt = parse_stored_timestamp(&file.upload_date);
     let content_type = guess_webdav_content_type(&file.filename);
     WebDavListItem {
         href: webdav_href(&file_virtual_path(&file)),
         name: file.filename,
         size: file.filesize,
-        created: timestamp.clone(),
-        modified: timestamp,
+        created: iso8601_date(&dt),
+        modified: http_date(&dt),
         is_collection: false,
         content_type,
     }
@@ -282,13 +297,13 @@ fn list_folder_entries(state: &AppState, current_path: &str) -> Vec<WebDavListIt
     let mut folder_items = folders
         .into_iter()
         .map(|folder| {
-            let timestamp = collection_timestamp();
+            let (created, modified) = collection_timestamps();
             WebDavListItem {
                 href: webdav_href(&folder),
                 name: folder.rsplit('/').next().unwrap_or(&folder).to_string(),
                 size: 0,
-                created: timestamp.clone(),
-                modified: timestamp,
+                created,
+                modified,
                 is_collection: true,
                 content_type: "httpd/unix-directory".to_string(),
             }
@@ -561,7 +576,33 @@ async fn delete_webdav_file(state: Arc<AppState>, meta: database::FileMetadata) 
         Err(resp) => return resp,
     };
     let result: DeleteResult = tg_service.delete_file_with_chunks(&meta.file_id).await;
+
+    // Telegram permanently refusing a deletion (wrong/insufficient admin
+    // rights, or its 48h-old-message restriction for non-admin accounts) is
+    // not something a retry will ever fix - the file would otherwise be
+    // stuck in tgstate forever. In that case we still remove our own
+    // metadata so the file disappears from WebDAV/the admin UI, and just
+    // leave the now-orphaned message sitting in the Telegram channel (that
+    // costs nothing storage-wise). A genuine transport/network failure is
+    // different - it's worth surfacing as 502 so the client retries.
+    let telegram_permanently_refused = result.main_delete_reason.starts_with("telegram_error:");
+
     if result.main_message_deleted || result.main_delete_reason == "not_found" {
+        match database::delete_file_metadata(&state.db_pool, &meta.file_id) {
+            Ok(true) => StatusCode::NO_CONTENT.into_response(),
+            Ok(false) => {
+                http_error(StatusCode::NOT_FOUND, "file not found", "not_found").into_response()
+            }
+            Err(e) => crate::error::AppError::from(e).into_response(),
+        }
+    } else if telegram_permanently_refused {
+        tracing::warn!(
+            "Telegram refused to delete message for '{}' ({}) - removing tgstate metadata anyway \
+             and leaving the message orphaned in the channel. Reason: {}",
+            meta.filename,
+            meta.file_id,
+            result.main_delete_reason,
+        );
         match database::delete_file_metadata(&state.db_pool, &meta.file_id) {
             Ok(true) => StatusCode::NO_CONTENT.into_response(),
             Ok(false) => {
@@ -750,13 +791,13 @@ async fn root_handler(
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("1");
 
-            let timestamp = collection_timestamp();
+            let (created, modified) = collection_timestamps();
             let mut items = vec![WebDavListItem {
                 href: "/webdav".into(),
                 name: "webdav".into(),
                 size: 0,
-                created: timestamp.clone(),
-                modified: timestamp,
+                created,
+                modified,
                 is_collection: true,
                 content_type: "httpd/unix-directory".to_string(),
             }];
@@ -874,13 +915,13 @@ async fn entry_handler(
                     http_error(StatusCode::NOT_FOUND, "file not found", "not_found").into_response()
                 } else {
                     let current_name = normalized.rsplit('/').next().unwrap_or(&normalized);
-                    let timestamp = collection_timestamp();
+                    let (created, modified) = collection_timestamps();
                     let mut items = vec![WebDavListItem {
                         href: webdav_href(&normalized),
                         name: current_name.to_string(),
                         size: 0,
-                        created: timestamp.clone(),
-                        modified: timestamp,
+                        created,
+                        modified,
                         is_collection: true,
                         content_type: "httpd/unix-directory".to_string(),
                     }];
@@ -934,8 +975,28 @@ async fn entry_handler(
                 } else if folder_exists(&state, &normalized) {
                     StatusCode::METHOD_NOT_ALLOWED.into_response()
                 } else {
+                    // New folders created through WebDAV default to
+                    // "private" link visibility (rather than the normal
+                    // inherited/public default) - files dropped into a
+                    // folder you created via an OS-level file manager
+                    // mount shouldn't be reachable through an
+                    // unauthenticated public share link by default.
                     match database::ensure_folder_path(&state.db_pool, &normalized) {
-                        Ok(true) => StatusCode::CREATED.into_response(),
+                        Ok(true) => {
+                            if let Err(e) = database::set_folder_visibility(
+                                &state.db_pool,
+                                &normalized,
+                                "private",
+                                false,
+                            ) {
+                                tracing::warn!(
+                                    "MKCOL: failed to set default private visibility for '{}': {:?}",
+                                    normalized,
+                                    e
+                                );
+                            }
+                            StatusCode::CREATED.into_response()
+                        }
                         Ok(false) => StatusCode::METHOD_NOT_ALLOWED.into_response(),
                         Err(e) => crate::error::AppError::from(e).into_response(),
                     }

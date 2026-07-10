@@ -12,6 +12,7 @@ use serde::Deserialize;
 use crate::config;
 use crate::database;
 use crate::error::http_error;
+use crate::routes::api_upload;
 use crate::state::AppState;
 use crate::telegram::service::TelegramService;
 
@@ -28,6 +29,11 @@ pub struct BatchDeleteRequest {
 #[derive(Deserialize)]
 pub struct MoveFileRequest {
     folder_path: String,
+}
+
+#[derive(Deserialize)]
+pub struct RenameFileRequest {
+    filename: String,
 }
 
 #[derive(Deserialize)]
@@ -601,6 +607,47 @@ async fn move_file(
     }
 }
 
+async fn rename_file(
+    State(state): State<Arc<AppState>>,
+    Path(file_id): Path<String>,
+    Json(payload): Json<RenameFileRequest>,
+) -> impl IntoResponse {
+    let new_name = api_upload::sanitize_filename(&payload.filename);
+    if new_name.is_empty() {
+        return http_error(StatusCode::BAD_REQUEST, "文件名不能为空", "invalid_filename")
+            .into_response();
+    }
+
+    let Some(meta) = database::get_file_by_id(&state.db_pool, &file_id)
+        .ok()
+        .flatten()
+    else {
+        return http_error(StatusCode::NOT_FOUND, "文件不存在", "not_found").into_response();
+    };
+
+    // Purely a metadata rename - the Telegram message (looked up via
+    // file_id, never via filename) is completely untouched.
+    match database::rename_file(&state.db_pool, &file_id, &meta.folder_path, &new_name) {
+        Ok(true) => {
+            let event = crate::events::build_file_event(
+                "rename",
+                &file_id,
+                Some(new_name.as_str()),
+                Some(meta.filesize),
+                Some(meta.upload_date.as_str()),
+                meta.short_id.as_deref(),
+                Some(meta.folder_path.as_str()),
+            );
+            state
+                .event_bus
+                .publish(serde_json::to_string(&event).unwrap_or_default());
+            Json(serde_json::json!({ "status": "ok", "filename": new_name })).into_response()
+        }
+        Ok(false) => http_error(StatusCode::NOT_FOUND, "文件不存在", "not_found").into_response(),
+        Err(e) => crate::error::AppError::from(e).into_response(),
+    }
+}
+
 async fn update_link_settings(
     State(state): State<Arc<AppState>>,
     Path(file_id): Path<String>,
@@ -786,6 +833,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/files", get(get_files_list))
         .route("/api/files/:file_id", delete(delete_file))
         .route("/api/files/:file_id/move", post(move_file))
+        .route("/api/files/:file_id/rename", post(rename_file))
         .route(
             "/api/files/:file_id/link-settings",
             post(update_link_settings),
