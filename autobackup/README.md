@@ -1,15 +1,15 @@
 # 🗄️ Backup Tool — 自动定时备份工具
 
-支持多目录打包、循环保留、WebDAV / S3 远程上传，可通过 Docker 一键部署。
+支持多目录打包（合并/单独/逐子目录）、循环保留、通用 rclone 远程上传（WebDAV / S3 / SFTP / FTP / 网盘 / 本地路径…），可通过 Docker 一键部署。
 
 ## 📦 功能特性
 
-- **多目录备份** — 同时备份多个目录，支持合并或单独打包
+- **多目录备份** — 同时备份多个目录，支持合并打包、按目录单独打包
+- **逐子目录打包** — 一个源路径下每个子文件夹单独打一份（如 compose 下每个项目文件夹一份）
 - **灵活命名** — 自定义前缀 + 时间戳，格式自由配置
-- **自动轮转** — 本地和远程各自独立控制保留数量（默认 7 份）
+- **自动轮转** — 本地和远程各自独立控制保留数量，多前缀分组独立轮转（默认 7 份）
 - **多种压缩** — 支持 `gz` / `bz2` / `xz` / `zst`
-- **WebDAV 上传** — 兼容 OpenList、Nextcloud 等 WebDAV 服务
-- **S3 上传** — 兼容 AWS S3、MinIO、Cloudflare R2、阿里云 OSS 等
+- **通用异地备份** — WebDAV / S3 便捷配置，另提供自定义 rclone 通道，支持任意 rclone 后端（SFTP、FTP、SMB、OneDrive、Google Drive 等），不绑定任何特定服务商
 - **Webhook 通知** — 支持飞书、钉钉、Slack 等通知
 - **Docker 部署** — 提供完整 Dockerfile 和 Compose 配置
 
@@ -62,7 +62,7 @@ bash backup.sh
 | `BACKUP_PREFIX` | `backup` | 压缩包文件名前缀 |
 | `BACKUP_TIMESTAMP` | `%Y%m%d_%H%M%S` | 时间戳格式 |
 | `BACKUP_COMPRESS` | `gz` | 压缩格式: `gz/bz2/xz/zst` |
-| `BACKUP_SEPARATE` | `false` | 每目录单独打包 |
+| `BACKUP_SEPARATE` | `false` | 打包模式: `false` 合并 / `true` 按 BACKUP_DIRS 每目录单独打包 / `children` 每个源路径下子文件夹逐个单独打包 |
 | `BACKUP_RETENTION` | `7` | 本地保留份数 |
 
 ### 定时任务
@@ -77,13 +77,16 @@ bash backup.sh
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `REMOTE_TYPE` | `disabled` | 类型: `disabled/webdav/s3` |
+| `REMOTE_TYPE` | `disabled` | 类型: `disabled/webdav/s3/custom` |
 | `REMOTE_RETENTION` | `7` | 远程保留份数 |
+
+> 异地备份不绑定任何特定服务商：WebDAV / S3 是通用便捷预设，
+> `custom` 模式可透传任意 rclone 后端配置（SFTP / FTP / SMB / OneDrive / Google Drive / 本地路径等）。
 
 ### WebDAV 配置（`REMOTE_TYPE=webdav`）
 
 ```env
-WEBDAV_URL=http://your-openlist:5244/dav
+WEBDAV_URL=https://webdav.example.com/dav
 WEBDAV_USER=admin
 WEBDAV_PASS=your_password
 WEBDAV_PATH=/backups
@@ -98,6 +101,44 @@ S3_SECRET_KEY=your_secret
 S3_BUCKET=your-bucket
 S3_PATH=backups
 S3_REGION=us-east-1
+```
+
+### 自定义 rclone 远程（`REMOTE_TYPE=custom`）
+
+支持任意 rclone 后端。配置来源二选一：
+
+**方式一（推荐）：挂载配置文件**
+
+先写一个标准 rclone 配置文件（remote 名可自定义）：
+
+```ini
+[nas]
+type = sftp
+host = 192.168.1.10
+user = backup
+pass = xxxxxx   # 用 `rclone obscure` 生成
+```
+
+docker-compose.yml 中挂载后填写环境变量：
+
+```env
+REMOTE_TYPE=custom
+RCLONE_CUSTOM_CONF_FILE=/app/rclone-remote.conf
+RCLONE_CUSTOM_REMOTE=nas
+RCLONE_CUSTOM_PATH=backups/server1
+```
+
+**方式二：环境变量直接传配置内容**
+
+```env
+REMOTE_TYPE=custom
+RCLONE_CUSTOM_CONF='[nas]
+type = sftp
+host = 192.168.1.10
+user = backup
+pass = xxxxxx'
+RCLONE_CUSTOM_REMOTE=nas
+RCLONE_CUSTOM_PATH=backups/server1
 ```
 
 ---
@@ -138,7 +179,9 @@ docker compose restart backup
 
 ---
 
-## 🌐 OpenList WebDAV 配置参考
+## 🌐 OpenList WebDAV 配置参考（示例）
+
+> 以下仅为使用示例，WebDAV 支持任意服务商（Nextcloud、OwnCloud 等同样适用）。
 
 OpenList 默认 WebDAV 地址为 `http://<host>:<port>/dav`，端口默认 `5244`。
 

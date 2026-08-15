@@ -32,6 +32,10 @@ services:
       # 日志目录（可选，方便查看历史日志）
       - /opt/backup/logs:/app/logs
 
+      # 自定义 rclone 配置（REMOTE_TYPE=custom 时使用）
+      # 宿主机配置文件 -> 容器内路径，与 .env 中 RCLONE_CUSTOM_CONF_FILE 对应
+      # - /opt/backup/rclone-remote.conf:/app/rclone-remote.conf:ro
+
       # 如果使用 .env 文件配置，挂载到容器中（可选）
       # - ./.env:/app/.env:ro
 
