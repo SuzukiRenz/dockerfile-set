@@ -3,7 +3,6 @@ use chrono::{NaiveDateTime, Utc};
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
-use tracing::warn;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -49,57 +48,26 @@ pub fn authorize(method: &Method, uri: &Uri, headers: &HeaderMap, payload_hash: 
         let age = (Utc::now().naive_utc() - t).num_seconds().abs(); if age > skew_seconds { return false; }
     } else { return false; }
     let signed_payload_hash = headers.get("x-amz-content-sha256").and_then(|v|v.to_str().ok()).unwrap_or("");
-    // AWS clients may omit x-amz-content-sha256 on body-less GET/HEAD requests.
-    // Treat that case like the standard UNSIGNED-PAYLOAD marker; body-bearing
-    // requests still require an exact SHA-256 match.
-    let canonical_payload_hash = if signed_payload_hash == "UNSIGNED-PAYLOAD"
-        || (signed_payload_hash.is_empty() && matches!(*method, Method::GET | Method::HEAD))
-    {
-        "UNSIGNED-PAYLOAD"
-    } else {
-        if signed_payload_hash != payload_hash
-            || payload_hash.len() != 64
-            || !payload_hash.bytes().all(|b| b.is_ascii_hexdigit())
-        {
-            return false;
-        }
-        payload_hash
-    };
-    // SignedHeaders is part of the signature. Preserve the client's declared
-    // sequence and spelling after validating the required lowercase form; do not
-    // sort/deduplicate it and thereby verify a different CanonicalRequest.
-    let names: Vec<&str> = signed_headers.split(';').filter(|x| !x.is_empty()).collect();
-    if names.is_empty() || names.iter().any(|x| *x != x.to_ascii_lowercase() || x.contains(':')) { return false; }
-    let normalized_signed_headers = signed_headers;
+    if signed_payload_hash == "UNSIGNED-PAYLOAD" || signed_payload_hash != payload_hash { return false; }
+    if payload_hash.len() != 64 || !payload_hash.bytes().all(|b| b.is_ascii_hexdigit()) { return false; }
+    let mut names: Vec<String> = signed_headers.split(';').filter(|x| !x.is_empty()).map(|x| x.to_ascii_lowercase()).collect();
+    names.sort(); names.dedup();
+    if names.is_empty() || names.iter().any(|x| x.is_empty() || x.contains(':')) { return false; }
+    let normalized_signed_headers = names.join(";");
     let mut canonical_headers = String::new();
     for name in &names {
-        let Some(v) = headers.get(*name).and_then(|v|v.to_str().ok()) else { return false; };
+        let Some(v) = headers.get(name.as_str()).and_then(|v|v.to_str().ok()) else { return false; };
         canonical_headers.push_str(name); canonical_headers.push(':'); canonical_headers.push_str(&normalize(v)); canonical_headers.push('\n');
     }
     let canonical_uri = match canonical_uri(uri.path()) { Some(v) => v, None => return false };
     let canonical_query = match canonical_query(uri) { Some(v) => v, None => return false };
-    let canonical = format!("{}\n{}\n{}\n{}\n{}\n{}", method.as_str(), canonical_uri, canonical_query, canonical_headers, normalized_signed_headers, canonical_payload_hash);
+    let canonical = format!("{}\n{}\n{}\n{}\n{}\n{}", method.as_str(), canonical_uri, canonical_query, canonical_headers, normalized_signed_headers, payload_hash);
     let scope = format!("{date}/{cred_region}/{service}/aws4_request");
     let hashed = hex(&Sha256::digest(canonical.as_bytes()));
     let string_to_sign = format!("AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{hashed}");
     let k_date = hmac(format!("AWS4{secret_key}").as_bytes(), date.as_bytes());
     let k_region = hmac(&k_date, cred_region.as_bytes()); let k_service = hmac(&k_region, service.as_bytes()); let k_signing = hmac(&k_service, b"aws4_request");
-    let expected = hex(&hmac(&k_signing, string_to_sign.as_bytes()));
-    let valid: bool = expected.as_bytes().ct_eq(signature.to_ascii_lowercase().as_bytes()).into();
-    if !valid {
-        warn!(
-            method = %method,
-            uri = %uri,
-            canonical_uri = %canonical_uri,
-            canonical_query = %canonical_query,
-            signed_headers = %normalized_signed_headers,
-            payload_marker = %canonical_payload_hash,
-            expected_signature_prefix = %&expected[..12],
-            supplied_signature_prefix = %signature.get(..12).unwrap_or(signature),
-            "AWS SigV4 signature mismatch"
-        );
-    }
-    valid
+    let expected = hex(&hmac(&k_signing, string_to_sign.as_bytes())); expected.as_bytes().ct_eq(signature.to_ascii_lowercase().as_bytes()).into()
 }
 fn normalize(v: &str) -> String { v.trim().split_whitespace().collect::<Vec<_>>().join(" ") }
 fn aws_encode_bytes(bytes: &[u8], encode_slash: bool) -> String {
@@ -120,26 +88,7 @@ fn percent_decode(raw: &str) -> Option<Vec<u8>> {
     }
     Some(out)
 }
-fn canonical_uri(path: &str) -> Option<String> {
-    // S3 uses the single-encoded request target. Uri::path() retains the raw
-    // percent escapes; preserve valid escapes instead of decoding and re-encoding
-    // them, which changes paths containing %25/%2F and breaks SigV4.
-    let path = if path.is_empty() { "/" } else { path };
-    let bytes = path.as_bytes();
-    let mut out = String::with_capacity(path.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            if i + 2 >= bytes.len() || !bytes[i + 1].is_ascii_hexdigit() || !bytes[i + 2].is_ascii_hexdigit() { return None; }
-            out.push('%'); out.push((bytes[i + 1] as char).to_ascii_uppercase()); out.push((bytes[i + 2] as char).to_ascii_uppercase()); i += 3;
-        } else if bytes[i].is_ascii_alphanumeric() || matches!(bytes[i], b'/' | b'-' | b'_' | b'.' | b'~') {
-            out.push(bytes[i] as char); i += 1;
-        } else {
-            out.push_str(&format!("%{:02X}", bytes[i])); i += 1;
-        }
-    }
-    Some(out)
-}
+fn canonical_uri(path: &str) -> Option<String> { percent_decode(if path.is_empty() { "/" } else { path }).map(|v| aws_encode_bytes(&v, false)) }
 fn canonical_query(uri: &Uri) -> Option<String> {
     let mut q: Vec<(String,String)> = Vec::new();
     for pair in uri.query().unwrap_or("").split('&').filter(|x| !x.is_empty()) {
@@ -188,22 +137,5 @@ mod tests {
     #[test]
     fn normalization_trims_and_collapses_whitespace() {
         assert_eq!(normalize("  alpha\t beta   gamma  "), "alpha beta gamma");
-    }
-
-    #[test]
-    fn unsigned_payload_is_allowed_as_a_canonical_marker() {
-        let signed_payload_hash = "UNSIGNED-PAYLOAD";
-        let canonical_payload_hash = if signed_payload_hash == "UNSIGNED-PAYLOAD" {
-            "UNSIGNED-PAYLOAD"
-        } else {
-            "unexpected"
-        };
-        assert_eq!(canonical_payload_hash, "UNSIGNED-PAYLOAD");
-    }
-
-    #[test]
-    fn canonical_uri_preserves_encoded_reserved_bytes() {
-        assert_eq!(canonical_uri("/admin/a%252Fb").as_deref(), Some("/admin/a%252Fb"));
-        assert_eq!(canonical_uri("/admin/a%2fb").as_deref(), Some("/admin/a%2Fb"));
     }
 }

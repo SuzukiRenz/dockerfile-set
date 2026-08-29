@@ -1,20 +1,25 @@
 services:
   tg-s3-bot:
+    container_name: tgs3
     build: .
+    image: tg-s3-bot:local
     restart: unless-stopped
     ports:
-      - "8080:8080"
-    environment:
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
-      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
-      # Everything below has a sane default; uncomment to override.
-      # BIND_ADDR: 0.0.0.0:8080
-      # S3_REGION: us-east-1
-      # CHUNK_SIZE_BYTES: 18874368        # 18 MiB, safely under Bot API's 20MB download cap
-      # BACKUP_INTERVAL_SECS: 21600       # 6h; 0 disables scheduled backups
-      # BACKUP_KEEP: 14
-      # SSE_S3_MASTER_KEY:                # base64 32-byte key; generate with: openssl rand -base64 32
+      - "8090:8080"
+    env_file:
+      - .env
     volumes:
-      - tg-s3-data:/data
-volumes:
-  tg-s3-data:
+      - /opt/tgs3/data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1770
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - tgs3_default
+
+networks:
+  tgs3_default:
+    external: true

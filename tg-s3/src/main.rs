@@ -496,7 +496,25 @@ async fn bootstrap_root_key(c: &Config) -> Result<(), Box<dyn std::error::Error>
     tokio::task::spawn_blocking(move || db::cred_insert(&p2, &ak, &sk, true, None, "")).await??;
     if let Some(dir) = c.database_path.parent() {
         let path = dir.join("ROOT_CREDENTIALS.txt");
-        let contents = format!("# tg-s3-bot root credentials (generated once on first boot)\nS3_ACCESS_KEY_ID={access_key}\nS3_SECRET_ACCESS_KEY={secret_key}\nS3_REGION={}\n", c.region);
+        let contents = format!(
+            "# tg-s3-bot root credentials (generated once on first boot)\n\
+             S3_ACCESS_KEY_ID={access_key}\n\
+             S3_SECRET_ACCESS_KEY={secret_key}\n\
+             S3_REGION={}\n\
+             \n\
+             # The root key has no bucket restriction. A bucket named \"default\" was\n\
+             # created automatically -- use it, or PUT any other bucket name to create it.\n\
+             #\n\
+             # Reserved: the \"{}\" bucket is admin-only (scheduled backups live under\n\
+             # {}/backup/, restore by PUTting a file to {}/recover/). Change its name\n\
+             # with the ADMIN_BUCKET env var if you need a bucket called \"{}\" for real data.\n\
+             #\n\
+             # To create a scoped key confined to one bucket+prefix:\n\
+             #   docker compose exec tg-s3-bot tg-s3-bot credential add <bucket> --prefix <prefix>/\n\
+             #   docker compose exec tg-s3-bot tg-s3-bot credential list\n\
+             #   docker compose exec tg-s3-bot tg-s3-bot credential rm <access_key>\n",
+            c.region, c.admin_bucket, c.admin_bucket, c.admin_bucket, c.admin_bucket
+        );
         fs::write(&path, contents).await?;
         info!(path = ?path, "root access key generated on first boot; secret is in this file, not in the logs");
     }
