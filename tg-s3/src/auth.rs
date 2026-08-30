@@ -80,7 +80,7 @@ pub fn authorize(method: &Method, uri: &Uri, headers: &HeaderMap, payload_hash: 
         warn!(reason = "x_amz_date_missing_or_inconsistent_with_credential_date", x_amz_date = %amz_date, credential_date = %date, "AWS SigV4 rejected");
         return false;
     }
-    let t = match NaiveDateTime::parse_from_str(amz_date, "%Y%m%dT%H%M%S") {
+    let t = match NaiveDateTime::parse_from_str(amz_date, "%Y%m%dT%H%M%SZ") {
         Ok(v) => v,
         Err(_) => { warn!(reason = "x_amz_date_unparseable", x_amz_date = %amz_date, "AWS SigV4 rejected"); return false; }
     };
@@ -260,6 +260,17 @@ mod tests {
             "unexpected"
         };
         assert_eq!(canonical_payload_hash, "UNSIGNED-PAYLOAD");
+    }
+
+    #[test]
+    fn amz_date_format_includes_trailing_z() {
+        // x-amz-date is ISO-8601 basic format with a literal trailing 'Z'
+        // (e.g. "20260830T104925Z"), not just "%Y%m%dT%H%M%S" -- chrono's
+        // parse_from_str requires the format to consume the whole string, so
+        // forgetting the 'Z' here makes every request fail with
+        // x_amz_date_unparseable regardless of a correct signature.
+        assert!(NaiveDateTime::parse_from_str("20260830T104925Z", "%Y%m%dT%H%M%SZ").is_ok());
+        assert!(NaiveDateTime::parse_from_str("20260830T104925Z", "%Y%m%dT%H%M%S").is_err());
     }
 
     #[test]
