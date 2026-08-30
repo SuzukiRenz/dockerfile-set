@@ -5,7 +5,7 @@ services:
     image: tg-s3-bot:local
     restart: unless-stopped
     ports:
-      - "8090:8080"
+      - "8090:8090"
     env_file:
       - .env
     volumes:

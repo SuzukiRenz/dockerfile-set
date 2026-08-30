@@ -27,11 +27,11 @@ docker compose up -d --build
 Example AWS CLI calls (the client signs requests with SigV4):
 
 ```sh
-aws --endpoint-url http://127.0.0.1:8080 s3api list-buckets
-aws --endpoint-url http://127.0.0.1:8080 s3api put-object --bucket demo --key hello.txt --body ./hello.txt
-aws --endpoint-url http://127.0.0.1:8080 s3api head-object --bucket demo --key hello.txt
-aws --endpoint-url http://127.0.0.1:8080 s3api get-object --bucket demo --key hello.txt ./downloaded.txt
-aws --endpoint-url http://127.0.0.1:8080 s3api delete-object --bucket demo --key hello.txt
+aws --endpoint-url http://127.0.0.1:8090 s3api list-buckets
+aws --endpoint-url http://127.0.0.1:8090 s3api put-object --bucket demo --key hello.txt --body ./hello.txt
+aws --endpoint-url http://127.0.0.1:8090 s3api head-object --bucket demo --key hello.txt
+aws --endpoint-url http://127.0.0.1:8090 s3api get-object --bucket demo --key hello.txt ./downloaded.txt
+aws --endpoint-url http://127.0.0.1:8090 s3api delete-object --bucket demo --key hello.txt
 ```
 
 The gateway uses path-style URLs (`/<bucket>/<key>`). Keep the endpoint behind TLS and a reverse proxy in production.

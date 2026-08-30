@@ -9,6 +9,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY --from=build /src/target/release/tg-s3-bot /usr/local/bin/tg-s3-bot
 ENV DATA_DIR=/data
 VOLUME ["/data"]
-EXPOSE 8080
+EXPOSE 8090
 ENTRYPOINT ["/usr/local/bin/tg-s3-bot"]
 CMD ["serve"]

@@ -21,14 +21,29 @@ pub fn extract_access_key(headers: &HeaderMap) -> Option<String> {
     None
 }
 
+/// Log a rejection reason with enough context to diagnose it, then return false.
+/// Never logs `secret_key` or the full `signature`/computed digest secrets -- those
+/// two are non-secret derived values (safe), everything else here is either public
+/// request metadata or server config, not credential material.
+macro_rules! deny {
+    ($reason:expr, $($k:ident = $v:expr),* $(,)?) => {{
+        warn!(reason = $reason, $($k = $v),*, "AWS SigV4 rejected");
+        return false;
+    }};
+}
+
 /// AWS Signature V4 verifier for header-authenticated requests.
 ///
 /// Canonicalization follows AWS SigV4: URI and query components are encoded from
 /// the raw request target, query pairs are sorted by encoded name/value, and
 /// signed header names are normalized to lowercase before lookup.
 pub fn authorize(method: &Method, uri: &Uri, headers: &HeaderMap, payload_hash: &str, region: &str, access_key: &str, secret_key: &str, skew_seconds: i64) -> bool {
-    let Some(auth) = headers.get("authorization").and_then(|v| v.to_str().ok()) else { return false; };
-    let Some(rest) = auth.strip_prefix("AWS4-HMAC-SHA256 ") else { return false; };
+    let Some(auth) = headers.get("authorization").and_then(|v| v.to_str().ok()) else {
+        deny!("missing_or_non_utf8_authorization_header",);
+    };
+    let Some(rest) = auth.strip_prefix("AWS4-HMAC-SHA256 ") else {
+        deny!("authorization_header_not_aws4_hmac_sha256", received_prefix = %auth.chars().take(24).collect::<String>());
+    };
     let mut credential = ""; let mut signed_headers = ""; let mut signature = "";
     for item in rest.split(',') {
         let mut kv = item.trim().splitn(2, '=');
@@ -42,13 +57,37 @@ pub fn authorize(method: &Method, uri: &Uri, headers: &HeaderMap, payload_hash: 
     let mut cp = credential.split('/');
     let access = cp.next().unwrap_or(""); let date = cp.next().unwrap_or("");
     let cred_region = cp.next().unwrap_or(""); let service = cp.next().unwrap_or("");
-    if access != access_key || cred_region != region || service != "s3" || cp.next() != Some("aws4_request") || date.len() != 8 || signature.len() != 64 || !signature.bytes().all(|b| b.is_ascii_hexdigit()) { return false; }
-    let amz_date = headers.get("x-amz-date").and_then(|v|v.to_str().ok()).unwrap_or("");
-    if amz_date.len() != 16 || !amz_date.starts_with(date) { return false; }
-    if let Ok(t) = NaiveDateTime::parse_from_str(amz_date, "%Y%m%dT%H%M%S") {
-        let age = (Utc::now().naive_utc() - t).num_seconds().abs(); if age > skew_seconds { return false; }
-    } else { return false; }
-    let signed_payload_hash = headers.get("x-amz-content-sha256").and_then(|v|v.to_str().ok()).unwrap_or("");
+    let aws4_request_literal = cp.next();
+    if access != access_key {
+        deny!("credential_access_key_mismatch", client_sent = %access, server_expected = %access_key);
+    }
+    if cred_region != region {
+        deny!("region_mismatch", client_sent = %cred_region, server_expects = %region, hint = "set S3_REGION to match the client's configured region, or reconfigure the client");
+    }
+    if service != "s3" {
+        deny!("service_not_s3", client_sent = %service);
+    }
+    if aws4_request_literal != Some("aws4_request") {
+        deny!("credential_scope_not_aws4_request", client_sent = %aws4_request_literal.unwrap_or(""));
+    }
+    if date.len() != 8 {
+        deny!("credential_date_wrong_length", client_sent = %date);
+    }
+    if signature.len() != 64 || !signature.bytes().all(|b| b.is_ascii_hexdigit()) {
+        deny!("signature_not_64_hex_chars", client_sent_len = signature.len());
+    }
+    let amz_date = headers.get("x-amz-date").and_then(|v| v.to_str().ok()).unwrap_or("");
+    if amz_date.len() != 16 || !amz_date.starts_with(date) {
+        deny!("x_amz_date_missing_or_inconsistent_with_credential_date", x_amz_date = %amz_date, credential_date = %date);
+    }
+    let Ok(t) = NaiveDateTime::parse_from_str(amz_date, "%Y%m%dT%H%M%S") else {
+        deny!("x_amz_date_unparseable", x_amz_date = %amz_date);
+    };
+    let age = (Utc::now().naive_utc() - t).num_seconds();
+    if age.abs() > skew_seconds {
+        deny!("clock_skew_exceeded", x_amz_date = %amz_date, server_now = %Utc::now().naive_utc(), skew_seconds = age, allowed_skew_seconds = skew_seconds, hint = "check the server and client clocks are in sync (NTP)");
+    }
+    let signed_payload_hash = headers.get("x-amz-content-sha256").and_then(|v| v.to_str().ok()).unwrap_or("");
     // AWS clients may omit x-amz-content-sha256 on body-less GET/HEAD requests.
     // Treat that case like the standard UNSIGNED-PAYLOAD marker; body-bearing
     // requests still require an exact SHA-256 match.
@@ -57,11 +96,11 @@ pub fn authorize(method: &Method, uri: &Uri, headers: &HeaderMap, payload_hash: 
     {
         "UNSIGNED-PAYLOAD"
     } else {
-        if signed_payload_hash != payload_hash
-            || payload_hash.len() != 64
-            || !payload_hash.bytes().all(|b| b.is_ascii_hexdigit())
-        {
-            return false;
+        if payload_hash.len() != 64 || !payload_hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            deny!("server_computed_payload_hash_malformed", len = payload_hash.len());
+        }
+        if signed_payload_hash != payload_hash {
+            deny!("payload_hash_mismatch", client_sent = %signed_payload_hash, server_computed = %payload_hash, hint = "client's x-amz-content-sha256 does not match the SHA-256 of the body bytes the server actually received");
         }
         payload_hash
     };
@@ -69,15 +108,26 @@ pub fn authorize(method: &Method, uri: &Uri, headers: &HeaderMap, payload_hash: 
     // sequence and spelling after validating the required lowercase form; do not
     // sort/deduplicate it and thereby verify a different CanonicalRequest.
     let names: Vec<&str> = signed_headers.split(';').filter(|x| !x.is_empty()).collect();
-    if names.is_empty() || names.iter().any(|x| *x != x.to_ascii_lowercase() || x.contains(':')) { return false; }
+    if names.is_empty() {
+        deny!("signed_headers_empty",);
+    }
+    if let Some(bad) = names.iter().find(|x| **x != x.to_ascii_lowercase() || x.contains(':')) {
+        deny!("signed_header_name_not_lowercase", header = %bad);
+    }
     let normalized_signed_headers = signed_headers;
     let mut canonical_headers = String::new();
     for name in &names {
-        let Some(v) = headers.get(*name).and_then(|v|v.to_str().ok()) else { return false; };
+        let Some(v) = headers.get(*name).and_then(|v| v.to_str().ok()) else {
+            deny!("signed_header_missing_from_request_or_non_utf8", header = %name);
+        };
         canonical_headers.push_str(name); canonical_headers.push(':'); canonical_headers.push_str(&normalize(v)); canonical_headers.push('\n');
     }
-    let canonical_uri = match canonical_uri(uri.path()) { Some(v) => v, None => return false };
-    let canonical_query = match canonical_query(uri) { Some(v) => v, None => return false };
+    let Some(canonical_uri) = canonical_uri(uri.path()) else {
+        deny!("uri_path_has_invalid_percent_encoding", path = %uri.path());
+    };
+    let Some(canonical_query) = canonical_query(uri) else {
+        deny!("query_string_has_invalid_percent_encoding", query = %uri.query().unwrap_or(""));
+    };
     let canonical = format!("{}\n{}\n{}\n{}\n{}\n{}", method.as_str(), canonical_uri, canonical_query, canonical_headers, normalized_signed_headers, canonical_payload_hash);
     let scope = format!("{date}/{cred_region}/{service}/aws4_request");
     let hashed = hex(&Sha256::digest(canonical.as_bytes()));
@@ -88,15 +138,17 @@ pub fn authorize(method: &Method, uri: &Uri, headers: &HeaderMap, payload_hash: 
     let valid: bool = expected.as_bytes().ct_eq(signature.to_ascii_lowercase().as_bytes()).into();
     if !valid {
         warn!(
+            reason = "final_signature_mismatch",
             method = %method,
             uri = %uri,
             canonical_uri = %canonical_uri,
             canonical_query = %canonical_query,
             signed_headers = %normalized_signed_headers,
+            canonical_headers = %canonical_headers.replace('\n', "|"),
             payload_marker = %canonical_payload_hash,
-            expected_signature_prefix = %&expected[..12],
-            supplied_signature_prefix = %signature.get(..12).unwrap_or(signature),
-            "AWS SigV4 signature mismatch"
+            expected_signature = %expected,
+            supplied_signature = %signature.to_ascii_lowercase(),
+            "AWS SigV4 rejected -- canonical request matched this server's own reconstruction, but the derived signature doesn't match; almost always a wrong secret_key (check ROOT_CREDENTIALS.txt / `tg-s3-bot credential list` against what the client has configured)"
         );
     }
     valid
@@ -141,7 +193,7 @@ fn canonical_uri(path: &str) -> Option<String> {
     Some(out)
 }
 fn canonical_query(uri: &Uri) -> Option<String> {
-    let mut q: Vec<(String,String)> = Vec::new();
+    let mut q: Vec<(String, String)> = Vec::new();
     for pair in uri.query().unwrap_or("").split('&').filter(|x| !x.is_empty()) {
         let mut s = pair.splitn(2, '=');
         let k = percent_decode(s.next().unwrap_or(""))?;
@@ -149,10 +201,10 @@ fn canonical_query(uri: &Uri) -> Option<String> {
         q.push((aws_encode_bytes(&k, true), aws_encode_bytes(&v, true)));
     }
     q.sort();
-    Some(q.into_iter().map(|(k,v)| format!("{k}={v}")).collect::<Vec<_>>().join("&"))
+    Some(q.into_iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&"))
 }
-fn hmac(key: &[u8], data: &[u8]) -> Vec<u8> { let mut m=HmacSha256::new_from_slice(key).expect("valid hmac key"); m.update(data); m.finalize().into_bytes().to_vec() }
-fn hex(b: &[u8]) -> String { b.iter().map(|x|format!("{x:02x}")).collect() }
+fn hmac(key: &[u8], data: &[u8]) -> Vec<u8> { let mut m = HmacSha256::new_from_slice(key).expect("valid hmac key"); m.update(data); m.finalize().into_bytes().to_vec() }
+fn hex(b: &[u8]) -> String { b.iter().map(|x| format!("{x:02x}")).collect() }
 
 
 #[cfg(test)]

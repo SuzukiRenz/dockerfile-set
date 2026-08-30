@@ -47,7 +47,7 @@ impl Config {
             _ => None,
         };
         Ok(Self {
-            bind: optional("BIND_ADDR", "0.0.0.0:8080").parse().map_err(|e| ConfigError::Invalid("BIND_ADDR".into(), format!("{e}")))?,
+            bind: optional("BIND_ADDR", "0.0.0.0:8090").parse().map_err(|e| ConfigError::Invalid("BIND_ADDR".into(), format!("{e}")))?,
             bot_token: required("TELEGRAM_BOT_TOKEN")?,
             chat_id: required("TELEGRAM_CHAT_ID")?,
             database_path: PathBuf::from(optional("DATABASE_PATH", &data_dir.join("tg-s3.db").to_string_lossy())),
