@@ -142,7 +142,7 @@ async fn list(State(a): State<App>, h: HeaderMap, uri: Uri, Path(bucket): Path<S
                         }
                     }
                 }
-                contents.push_str(&format!("<Contents><Key>{}</Key><LastModified>{}</LastModified><ETag>&quot;{}&quot;</ETag><Size>{}</Size><StorageClass>STANDARD</StorageClass></Contents>", esc(visible_key), o.updated_at, esc(&o.etag), o.size));
+                contents.push_str(&format!("<Contents><Key>{}</Key><LastModified>{}</LastModified><ETag>&quot;{}&quot;</ETag><Size>{}</Size><StorageClass>STANDARD</StorageClass></Contents>", esc(visible_key), util::rfc3339(o.updated_at), esc(&o.etag), o.size));
             }
             let cps = common.into_iter().map(|p| format!("<CommonPrefixes><Prefix>{}</Prefix></CommonPrefixes>", esc(&p))).collect::<String>();
             xml(format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><ListBucketResult><Name>{}</Name><Prefix>{}</Prefix><MaxKeys>{}</MaxKeys><IsTruncated>false</IsTruncated>{}{}</ListBucketResult>", esc(&bucket), esc(&client_prefix), max, contents, cps))
@@ -155,8 +155,8 @@ async fn admin_list(a: &App) -> Response {
     let backups = admin::list_dir(&a.cfg.backup_dir).await;
     let recovers = admin::list_dir(&a.cfg.recover_dir).await;
     let mut contents = String::new();
-    for (name, size, mtime) in backups { contents.push_str(&format!("<Contents><Key>backup/{}</Key><LastModified>{}</LastModified><Size>{}</Size></Contents>", esc(&name), mtime, size)); }
-    for (name, size, mtime) in recovers { contents.push_str(&format!("<Contents><Key>recover/{}</Key><LastModified>{}</LastModified><Size>{}</Size></Contents>", esc(&name), mtime, size)); }
+    for (name, size, mtime) in backups { contents.push_str(&format!("<Contents><Key>backup/{}</Key><LastModified>{}</LastModified><Size>{}</Size></Contents>", esc(&name), util::rfc3339(mtime), size)); }
+    for (name, size, mtime) in recovers { contents.push_str(&format!("<Contents><Key>recover/{}</Key><LastModified>{}</LastModified><Size>{}</Size></Contents>", esc(&name), util::rfc3339(mtime), size)); }
     xml(format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><ListBucketResult><Name>admin</Name><IsTruncated>false</IsTruncated>{contents}</ListBucketResult>"))
 }
 
@@ -306,7 +306,7 @@ async fn copy_object(a: App, h: HeaderMap, uri: Uri, dst_bucket: String, dst_key
     let now = Utc::now().timestamp();
     let p2 = a.cfg.database_path.clone();
     match db_call(move || db::copy_object_fastpath(&p2, &src_bucket, &real_src_key, &dst_bucket, &real_dst_key, new_ct.as_deref(), now)).await {
-        Ok(Some(dst)) => xml(format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><CopyObjectResult><ETag>&quot;{}&quot;</ETag><LastModified>{}</LastModified></CopyObjectResult>", esc(&dst.etag), Utc::now().to_rfc3339())),
+        Ok(Some(dst)) => xml(format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><CopyObjectResult><ETag>&quot;{}&quot;</ETag><LastModified>{}</LastModified></CopyObjectResult>", esc(&dst.etag), util::rfc3339(now))),
         Ok(None) => err(StatusCode::NOT_FOUND, "NoSuchKey", "source object does not exist"),
         Err(e) => e,
     }

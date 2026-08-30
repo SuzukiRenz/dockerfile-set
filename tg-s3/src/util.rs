@@ -10,6 +10,19 @@ pub fn err(code: StatusCode, code_name: &str, msg: &str) -> Response {
 }
 pub fn hex(b: &[u8]) -> String { b.iter().map(|x| format!("{x:02x}")).collect() }
 
+/// Format a unix timestamp (seconds) as the ISO-8601 form S3 clients expect in XML
+/// (`LastModified`, etc.): e.g. `2026-01-02T15:04:05.000Z`. Every S3 XML timestamp
+/// in this codebase must go through here -- a bare integer or a `+00:00`-suffixed
+/// `to_rfc3339()` string both fail strict client-side parsers (this is what broke
+/// OpenList's ListObjectsV2 decoding). Falls back to the Unix epoch if the stored
+/// timestamp is somehow out of chrono's representable range, rather than panicking.
+pub fn rfc3339(unix_secs: i64) -> String {
+    chrono::DateTime::from_timestamp(unix_secs, 0)
+        .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap())
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string()
+}
+
 pub fn query_params(uri: &axum::http::Uri) -> BTreeMap<String, String> {
     urlencoding::decode(uri.query().unwrap_or("")).map(|c| c.into_owned()).unwrap_or_default()
         .split('&').filter(|s| !s.is_empty())
