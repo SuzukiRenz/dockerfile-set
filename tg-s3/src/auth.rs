@@ -21,28 +21,21 @@ pub fn extract_access_key(headers: &HeaderMap) -> Option<String> {
     None
 }
 
-/// Log a rejection reason with enough context to diagnose it, then return false.
-/// Never logs `secret_key` or the full `signature`/computed digest secrets -- those
-/// two are non-secret derived values (safe), everything else here is either public
-/// request metadata or server config, not credential material.
-macro_rules! deny {
-    ($reason:expr, $($k:ident = $v:expr),* $(,)?) => {{
-        warn!(reason = $reason, $($k = $v),*, "AWS SigV4 rejected");
-        return false;
-    }};
-}
-
 /// AWS Signature V4 verifier for header-authenticated requests.
 ///
 /// Canonicalization follows AWS SigV4: URI and query components are encoded from
 /// the raw request target, query pairs are sorted by encoded name/value, and
-/// signed header names are normalized to lowercase before lookup.
+/// signed header names are normalized to lowercase before lookup. Every rejection
+/// path logs a `reason` field at `warn` level with enough context to diagnose it
+/// without a compiler in hand -- check `docker compose logs` after a failed request.
 pub fn authorize(method: &Method, uri: &Uri, headers: &HeaderMap, payload_hash: &str, region: &str, access_key: &str, secret_key: &str, skew_seconds: i64) -> bool {
-    let Some(auth) = headers.get("authorization").and_then(|v| v.to_str().ok()) else {
-        deny!("missing_or_non_utf8_authorization_header",);
+    let auth = match headers.get("authorization").and_then(|v| v.to_str().ok()) {
+        Some(v) => v,
+        None => { warn!(reason = "missing_or_non_utf8_authorization_header", "AWS SigV4 rejected"); return false; }
     };
-    let Some(rest) = auth.strip_prefix("AWS4-HMAC-SHA256 ") else {
-        deny!("authorization_header_not_aws4_hmac_sha256", received_prefix = %auth.chars().take(24).collect::<String>());
+    let rest = match auth.strip_prefix("AWS4-HMAC-SHA256 ") {
+        Some(v) => v,
+        None => { warn!(reason = "authorization_header_not_aws4_hmac_sha256", received_prefix = %auth.chars().take(24).collect::<String>(), "AWS SigV4 rejected"); return false; }
     };
     let mut credential = ""; let mut signed_headers = ""; let mut signature = "";
     for item in rest.split(',') {
@@ -59,33 +52,42 @@ pub fn authorize(method: &Method, uri: &Uri, headers: &HeaderMap, payload_hash: 
     let cred_region = cp.next().unwrap_or(""); let service = cp.next().unwrap_or("");
     let aws4_request_literal = cp.next();
     if access != access_key {
-        deny!("credential_access_key_mismatch", client_sent = %access, server_expected = %access_key);
+        warn!(reason = "credential_access_key_mismatch", client_sent = %access, server_expected = %access_key, "AWS SigV4 rejected");
+        return false;
     }
     if cred_region != region {
-        deny!("region_mismatch", client_sent = %cred_region, server_expects = %region, hint = "set S3_REGION to match the client's configured region, or reconfigure the client");
+        warn!(reason = "region_mismatch", client_sent = %cred_region, server_expects = %region, hint = "set S3_REGION to match the client's configured region, or reconfigure the client", "AWS SigV4 rejected");
+        return false;
     }
     if service != "s3" {
-        deny!("service_not_s3", client_sent = %service);
+        warn!(reason = "service_not_s3", client_sent = %service, "AWS SigV4 rejected");
+        return false;
     }
     if aws4_request_literal != Some("aws4_request") {
-        deny!("credential_scope_not_aws4_request", client_sent = %aws4_request_literal.unwrap_or(""));
+        warn!(reason = "credential_scope_not_aws4_request", client_sent = %aws4_request_literal.unwrap_or(""), "AWS SigV4 rejected");
+        return false;
     }
     if date.len() != 8 {
-        deny!("credential_date_wrong_length", client_sent = %date);
+        warn!(reason = "credential_date_wrong_length", client_sent = %date, "AWS SigV4 rejected");
+        return false;
     }
     if signature.len() != 64 || !signature.bytes().all(|b| b.is_ascii_hexdigit()) {
-        deny!("signature_not_64_hex_chars", client_sent_len = signature.len());
+        warn!(reason = "signature_not_64_hex_chars", client_sent_len = signature.len(), "AWS SigV4 rejected");
+        return false;
     }
     let amz_date = headers.get("x-amz-date").and_then(|v| v.to_str().ok()).unwrap_or("");
     if amz_date.len() != 16 || !amz_date.starts_with(date) {
-        deny!("x_amz_date_missing_or_inconsistent_with_credential_date", x_amz_date = %amz_date, credential_date = %date);
+        warn!(reason = "x_amz_date_missing_or_inconsistent_with_credential_date", x_amz_date = %amz_date, credential_date = %date, "AWS SigV4 rejected");
+        return false;
     }
-    let Ok(t) = NaiveDateTime::parse_from_str(amz_date, "%Y%m%dT%H%M%S") else {
-        deny!("x_amz_date_unparseable", x_amz_date = %amz_date);
+    let t = match NaiveDateTime::parse_from_str(amz_date, "%Y%m%dT%H%M%S") {
+        Ok(v) => v,
+        Err(_) => { warn!(reason = "x_amz_date_unparseable", x_amz_date = %amz_date, "AWS SigV4 rejected"); return false; }
     };
     let age = (Utc::now().naive_utc() - t).num_seconds();
     if age.abs() > skew_seconds {
-        deny!("clock_skew_exceeded", x_amz_date = %amz_date, server_now = %Utc::now().naive_utc(), skew_seconds = age, allowed_skew_seconds = skew_seconds, hint = "check the server and client clocks are in sync (NTP)");
+        warn!(reason = "clock_skew_exceeded", x_amz_date = %amz_date, server_now = %Utc::now().naive_utc(), skew_seconds = age, allowed_skew_seconds = skew_seconds, hint = "check the server and client clocks are in sync (NTP)", "AWS SigV4 rejected");
+        return false;
     }
     let signed_payload_hash = headers.get("x-amz-content-sha256").and_then(|v| v.to_str().ok()).unwrap_or("");
     // AWS clients may omit x-amz-content-sha256 on body-less GET/HEAD requests.
@@ -97,10 +99,12 @@ pub fn authorize(method: &Method, uri: &Uri, headers: &HeaderMap, payload_hash: 
         "UNSIGNED-PAYLOAD"
     } else {
         if payload_hash.len() != 64 || !payload_hash.bytes().all(|b| b.is_ascii_hexdigit()) {
-            deny!("server_computed_payload_hash_malformed", len = payload_hash.len());
+            warn!(reason = "server_computed_payload_hash_malformed", len = payload_hash.len(), "AWS SigV4 rejected");
+            return false;
         }
         if signed_payload_hash != payload_hash {
-            deny!("payload_hash_mismatch", client_sent = %signed_payload_hash, server_computed = %payload_hash, hint = "client's x-amz-content-sha256 does not match the SHA-256 of the body bytes the server actually received");
+            warn!(reason = "payload_hash_mismatch", client_sent = %signed_payload_hash, server_computed = %payload_hash, hint = "client's x-amz-content-sha256 does not match the SHA-256 of the body bytes the server actually received", "AWS SigV4 rejected");
+            return false;
         }
         payload_hash
     };
@@ -109,24 +113,29 @@ pub fn authorize(method: &Method, uri: &Uri, headers: &HeaderMap, payload_hash: 
     // sort/deduplicate it and thereby verify a different CanonicalRequest.
     let names: Vec<&str> = signed_headers.split(';').filter(|x| !x.is_empty()).collect();
     if names.is_empty() {
-        deny!("signed_headers_empty",);
+        warn!(reason = "signed_headers_empty", "AWS SigV4 rejected");
+        return false;
     }
     if let Some(bad) = names.iter().find(|x| **x != x.to_ascii_lowercase() || x.contains(':')) {
-        deny!("signed_header_name_not_lowercase", header = %bad);
+        warn!(reason = "signed_header_name_not_lowercase", header = %bad, "AWS SigV4 rejected");
+        return false;
     }
     let normalized_signed_headers = signed_headers;
     let mut canonical_headers = String::new();
     for name in &names {
-        let Some(v) = headers.get(*name).and_then(|v| v.to_str().ok()) else {
-            deny!("signed_header_missing_from_request_or_non_utf8", header = %name);
+        let v = match headers.get(*name).and_then(|v| v.to_str().ok()) {
+            Some(v) => v,
+            None => { warn!(reason = "signed_header_missing_from_request_or_non_utf8", header = %name, "AWS SigV4 rejected"); return false; }
         };
         canonical_headers.push_str(name); canonical_headers.push(':'); canonical_headers.push_str(&normalize(v)); canonical_headers.push('\n');
     }
-    let Some(canonical_uri) = canonical_uri(uri.path()) else {
-        deny!("uri_path_has_invalid_percent_encoding", path = %uri.path());
+    let canonical_uri = match canonical_uri(uri.path()) {
+        Some(v) => v,
+        None => { warn!(reason = "uri_path_has_invalid_percent_encoding", path = %uri.path(), "AWS SigV4 rejected"); return false; }
     };
-    let Some(canonical_query) = canonical_query(uri) else {
-        deny!("query_string_has_invalid_percent_encoding", query = %uri.query().unwrap_or(""));
+    let canonical_query = match canonical_query(uri) {
+        Some(v) => v,
+        None => { warn!(reason = "query_string_has_invalid_percent_encoding", query = %uri.query().unwrap_or(""), "AWS SigV4 rejected"); return false; }
     };
     let canonical = format!("{}\n{}\n{}\n{}\n{}\n{}", method.as_str(), canonical_uri, canonical_query, canonical_headers, normalized_signed_headers, canonical_payload_hash);
     let scope = format!("{date}/{cred_region}/{service}/aws4_request");
@@ -148,7 +157,7 @@ pub fn authorize(method: &Method, uri: &Uri, headers: &HeaderMap, payload_hash: 
             payload_marker = %canonical_payload_hash,
             expected_signature = %expected,
             supplied_signature = %signature.to_ascii_lowercase(),
-            "AWS SigV4 rejected -- canonical request matched this server's own reconstruction, but the derived signature doesn't match; almost always a wrong secret_key (check ROOT_CREDENTIALS.txt / `tg-s3-bot credential list` against what the client has configured)"
+            "AWS SigV4 rejected -- canonical request built fine, but the derived signature doesn't match; almost always a wrong secret_key (check ROOT_CREDENTIALS.txt / `tg-s3-bot credential list` against what the client has configured)"
         );
     }
     valid
