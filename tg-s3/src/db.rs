@@ -53,7 +53,8 @@ pub fn init(path: &Path) -> Result<(), DbError> {
             upload_id TEXT NOT NULL, part_number INTEGER NOT NULL, etag TEXT NOT NULL, size INTEGER NOT NULL,
             first_chunk_idx INTEGER NOT NULL, chunk_count INTEGER NOT NULL, PRIMARY KEY(upload_id,part_number));
         CREATE TABLE IF NOT EXISTS mp_chunks(
-            upload_id TEXT NOT NULL, idx INTEGER NOT NULL, message_id INTEGER NOT NULL, file_id TEXT NOT NULL,
+            upload_id TEXT NOT NULL, idx INTEGER NOT NULL, part_number INTEGER NOT NULL,
+            message_id INTEGER NOT NULL, file_id TEXT NOT NULL,
             size INTEGER NOT NULL, PRIMARY KEY(upload_id,idx));
     ")?;
     c.execute("INSERT OR IGNORE INTO buckets(name,created_at) VALUES('default', strftime('%s','now'))", [])?;
@@ -248,9 +249,9 @@ pub fn mp_reserve(path: &Path, upload_id: &str, n_chunks: i64) -> Result<i64, Db
     tx.commit()?;
     Ok(first)
 }
-pub fn mp_insert_chunk(path: &Path, upload_id: &str, idx: i64, message_id: i64, file_id: &str, size: i64) -> Result<(), DbError> {
+pub fn mp_insert_chunk(path: &Path, upload_id: &str, idx: i64, part_number: i64, message_id: i64, file_id: &str, size: i64) -> Result<(), DbError> {
     let c = Connection::open(path)?;
-    c.execute("INSERT INTO mp_chunks VALUES(?,?,?,?,?)", params![upload_id, idx, message_id, file_id, size])?;
+    c.execute("INSERT INTO mp_chunks VALUES(?,?,?,?,?,?)", params![upload_id, idx, part_number, message_id, file_id, size])?;
     Ok(())
 }
 pub fn mp_advance(path: &Path, upload_id: &str, part_number: i64, etag: &str, part_size: i64, first_chunk_idx: i64, chunk_count: i64) -> Result<(), DbError> {
@@ -286,17 +287,28 @@ pub fn mp_abort(path: &Path, upload_id: &str) -> Result<Vec<ChunkRef>, DbError> 
     tx.commit()?;
     Ok(chunks)
 }
-/// Complete: move staged chunks into object_chunks under (bucket,key) in ascending
-/// original-idx order (idx order reflects insertion order via mp_reserve, which the
-/// caller drives by ascending part number when it builds the final list), renumbering
-/// sequentially; insert the final objects row; drop bookkeeping.
-pub fn mp_complete(path: &Path, upload_id: &str, mp: &MultipartUpload, total_size: i64, etag: &str, now: i64) -> Result<(), DbError> {
+/// Complete: move the physical chunks belonging to exactly the parts the client
+/// listed (S3 permits completing with a subset of uploaded parts) into
+/// object_chunks under (bucket,key), ordered by (part_number, idx) -- i.e. true
+/// logical byte order -- not by upload arrival order, since parts may have been
+/// uploaded concurrently or out of order. Renumbers sequentially; inserts the final
+/// objects row; drops bookkeeping.
+pub fn mp_complete(path: &Path, upload_id: &str, mp: &MultipartUpload, part_numbers: &[i64], total_size: i64, etag: &str, now: i64) -> Result<(), DbError> {
     let mut c = Connection::open(path)?;
     let tx = c.transaction()?;
     tx.execute("INSERT OR IGNORE INTO buckets(name,created_at) VALUES(?,strftime('%s','now'))", [&mp.bucket])?;
     tx.execute("DELETE FROM object_chunks WHERE bucket=? AND key=?", params![mp.bucket, mp.key])?;
-    tx.execute("INSERT INTO object_chunks SELECT ?,?, ROW_NUMBER() OVER (ORDER BY idx) - 1, message_id, file_id, size FROM mp_chunks WHERE upload_id=?",
-        params![mp.bucket, mp.key, upload_id])?;
+    let placeholders = std::iter::repeat("?").take(part_numbers.len()).collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "INSERT INTO object_chunks SELECT ?,?, ROW_NUMBER() OVER (ORDER BY part_number, idx) - 1, message_id, file_id, size \
+         FROM mp_chunks WHERE upload_id=? AND part_number IN ({placeholders})"
+    );
+    let mut stmt = tx.prepare(&sql)?;
+    let mut bind_params: Vec<&dyn rusqlite::ToSql> = vec![&mp.bucket, &mp.key, &upload_id];
+    let part_number_vals: Vec<i64> = part_numbers.to_vec();
+    for v in &part_number_vals { bind_params.push(v); }
+    stmt.execute(bind_params.as_slice())?;
+    drop(stmt);
     tx.execute("INSERT OR REPLACE INTO objects VALUES(?,?,?,?,?,?,?,?)",
         params![mp.bucket, mp.key, total_size, mp.content_type, etag, now, mp.sse_algorithm, mp.sse_customer_key_md5])?;
     tx.execute("DELETE FROM mp_chunks WHERE upload_id=?", [upload_id])?;
