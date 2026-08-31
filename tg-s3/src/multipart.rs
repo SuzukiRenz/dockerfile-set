@@ -34,8 +34,7 @@ pub async fn create(a: App, cred: Credential, h: HeaderMap, bucket: String, real
 
 /// Resolve the raw key bytes an SSE-C/SSE-S3 multipart upload should use for this
 /// part, validating the customer key (if any) against what CreateMultipartUpload
-/// recorded. Each part is encrypted independently (own GCM nonce), so unlike the old
-/// CTR design there is no ordering requirement between parts any more.
+/// recorded. Each physical chunk is encrypted independently (own GCM nonce).
 fn part_key(a: &App, mp: &db::MultipartUpload, h: &HeaderMap) -> Result<Option<[u8; 32]>, Response> {
     if mp.sse_algorithm.is_none() { return Ok(None); }
     if let Some(stored_md5) = &mp.sse_customer_key_md5 {
@@ -53,6 +52,15 @@ fn part_key(a: &App, mp: &db::MultipartUpload, h: &HeaderMap) -> Result<Option<[
     }
 }
 
+/// Parts are coalesced across their own boundaries into fixed CHUNK_SIZE_BYTES
+/// physical Telegram chunks (see storage::stage_part), independent of whatever part
+/// size the S3 client chose to use -- a client using 5 MiB parts still produces
+/// ~18 MiB Telegram messages, not one message per part. That coalescing only works if
+/// bytes arrive in true logical order, so parts must be uploaded strictly
+/// sequentially (PartNumber == parts_uploaded + 1); this also fixes a subtler
+/// pre-existing bug where CompleteMultipartUpload assembled chunks in arrival order
+/// rather than PartNumber order, which could reorder content on an out-of-order
+/// client (S3 permits that ordering; this server no longer can allow it).
 pub async fn upload_part(a: App, h: HeaderMap, uri: Uri, upload_id: String, part_number: i64, body: Body) -> Response {
     if part_number < 1 || part_number > 10000 { return err(StatusCode::BAD_REQUEST, "InvalidArgument", "part number must be between 1 and 10000"); }
     let p = a.cfg.database_path.clone();
@@ -62,25 +70,40 @@ pub async fn upload_part(a: App, h: HeaderMap, uri: Uri, upload_id: String, part
         Ok(None) => return err(StatusCode::NOT_FOUND, "NoSuchUpload", "The specified multipart upload does not exist"),
         Err(e) => return e,
     };
+    if part_number != mp.parts_uploaded + 1 {
+        return err(
+            StatusCode::BAD_REQUEST, "InvalidPartOrder",
+            &format!("parts must be uploaded in strictly increasing order with no gaps; expected PartNumber {}, got {}", mp.parts_uploaded + 1, part_number),
+        );
+    }
     let key = match part_key(&a, &mp, &h) { Ok(v) => v, Err(e) => return e };
-    let staged = match storage::stage(body, &a.cfg, key.as_ref(), a.cfg.max_object_size).await {
+    let pending_tail = storage::load_pending_tail(&a.cfg, &upload_id).await;
+    let remaining_budget = a.cfg.max_object_size.saturating_sub(mp.bytes_so_far.max(0) as usize);
+    let staged = match storage::stage_part(body, &a.cfg, key.as_ref(), pending_tail, remaining_budget).await {
         Ok(s) => s,
-        Err(storage::StageError::TooLarge) => return err(StatusCode::PAYLOAD_TOO_LARGE, "EntityTooLarge", "part exceeds MAX_OBJECT_SIZE"),
+        Err(storage::StageError::TooLarge) => return err(StatusCode::PAYLOAD_TOO_LARGE, "EntityTooLarge", "object exceeds MAX_OBJECT_SIZE"),
         Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "InternalError", "Cannot stage part body"),
     };
+    // SigV4 and this part's own ETag cover exactly the bytes this HTTP request
+    // carried -- never the carried-over tail from the previous part.
     if let Err(e) = crate::guard(&Method::PUT, &uri, &h, &staged.sha256_hex, &a).await {
-        storage::cleanup(&staged).await;
+        storage::cleanup_chunks(&staged.full_chunks).await;
         return e;
     }
-    let n_chunks = staged.chunks.len() as i64;
+    if let Err(e) = storage::save_pending_tail(&a.cfg, &upload_id, &staged.tail).await {
+        error!(%e, "failed to persist multipart pending tail");
+        storage::cleanup_chunks(&staged.full_chunks).await;
+        return err(StatusCode::INTERNAL_SERVER_ERROR, "InternalError", "cannot persist upload state");
+    }
+    let n_chunks = staged.full_chunks.len() as i64;
     let p = a.cfg.database_path.clone();
     let uid = upload_id.clone();
     let first_idx = match crate::db_call(move || db::mp_reserve(&p, &uid, n_chunks)).await {
         Ok(v) => v,
-        Err(e) => { storage::cleanup(&staged).await; return e; }
+        Err(e) => { storage::cleanup_chunks(&staged.full_chunks).await; return e; }
     };
     let filename = mp.key.rsplit('/').next().unwrap_or(&mp.key).to_owned();
-    let chunks = match storage::upload(&a.client, &a.cfg, &staged, first_idx, &filename, &mp.content_type).await {
+    let chunks = match storage::upload(&a.client, &a.cfg, &staged.full_chunks, first_idx, &filename, &mp.content_type, false).await {
         Ok(c) => c,
         Err(e) => { error!(%e, "telegram upload (multipart part)"); return err(StatusCode::BAD_GATEWAY, "TelegramError", "Telegram upload failed"); }
     };
@@ -93,7 +116,7 @@ pub async fn upload_part(a: App, h: HeaderMap, uri: Uri, upload_id: String, part
     }
     let chunk_count = chunks.len() as i64;
     let etag = staged.sha256_hex.clone();
-    let (p, u2, etag2, part_size) = (a.cfg.database_path.clone(), upload_id.clone(), etag.clone(), staged.total_size);
+    let (p, u2, etag2, part_size) = (a.cfg.database_path.clone(), upload_id.clone(), etag.clone(), staged.part_size);
     match crate::db_call(move || db::mp_advance(&p, &u2, part_number, &etag2, part_size, first_idx, chunk_count)).await {
         Ok(_) => ([(axum::http::header::ETAG, format!("\"{etag}\""))], StatusCode::OK).into_response(),
         Err(e) => { storage::rollback_uploaded(&a.client, &a.cfg, &chunks).await; e }
@@ -133,6 +156,50 @@ pub async fn complete(a: App, h: HeaderMap, uri: Uri, upload_id: String, body: B
         hasher.update(rec.etag.as_bytes());
         total_size += rec.size;
     }
+    // Flush whatever's left in the pending tail (bytes carried over from the last
+    // part that never reached a full physical chunk) as the final chunk before
+    // assembling the object -- otherwise those trailing bytes would just vanish.
+    let tail = storage::load_pending_tail(&a.cfg, &upload_id).await;
+    if !tail.is_empty() {
+        // Only resolve (and require) a key when there's actually something left to
+        // encrypt. SSE-C requires the key on every UploadPart already; the S3 spec
+        // doesn't require it on CompleteMultipartUpload itself, so we only ask for it
+        // here in the (uncommon) case a trailing tail still needs encrypting -- and
+        // any resolution error is surfaced, never silently treated as "no key needed".
+        let key = if mp.sse_algorithm.is_some() {
+            match part_key(&a, &mp, &h) {
+                Ok(v) => v,
+                Err(e) => return e,
+            }
+        } else {
+            None
+        };
+        let final_chunk = match storage::flush_tail(&a.cfg, key.as_ref(), &tail).await {
+            Ok(Some(c)) => c,
+            Ok(None) => unreachable!("checked non-empty above"),
+            Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "InternalError", "cannot flush final buffered bytes"),
+        };
+        let p2 = a.cfg.database_path.clone();
+        let uid2 = upload_id.clone();
+        let first_idx = match crate::db_call(move || db::mp_reserve(&p2, &uid2, 1)).await {
+            Ok(v) => v,
+            Err(e) => { storage::cleanup_chunks(&[final_chunk]).await; return e; }
+        };
+        let filename = mp.key.rsplit('/').next().unwrap_or(&mp.key).to_owned();
+        let chunks = match storage::upload(&a.client, &a.cfg, std::slice::from_ref(&final_chunk), first_idx, &filename, &mp.content_type, false).await {
+            Ok(c) => c,
+            Err(e) => { error!(%e, "telegram upload (final multipart tail)"); return err(StatusCode::BAD_GATEWAY, "TelegramError", "Telegram upload failed"); }
+        };
+        for ch in &chunks {
+            let (p3, u3, idx, mid, fid, sz) = (a.cfg.database_path.clone(), upload_id.clone(), ch.idx, ch.message_id, ch.file_id.clone(), ch.size);
+            if let Err(e) = crate::db_call(move || db::mp_insert_chunk(&p3, &u3, idx, mid, &fid, sz)).await {
+                storage::rollback_uploaded(&a.client, &a.cfg, &chunks).await;
+                return e;
+            }
+        }
+        total_size += tail.len() as i64;
+    }
+    storage::discard_pending_tail(&a.cfg, &upload_id).await;
     let final_etag = format!("{}-{}", crate::util::hex(&hasher.finalize()), claimed.part.len());
     let now = Utc::now().timestamp();
     let p = a.cfg.database_path.clone();
@@ -145,6 +212,7 @@ pub async fn complete(a: App, h: HeaderMap, uri: Uri, upload_id: String, body: B
 }
 
 pub async fn abort(a: App, upload_id: String) -> Response {
+    storage::discard_pending_tail(&a.cfg, &upload_id).await;
     let p = a.cfg.database_path.clone();
     let uid = upload_id.clone();
     let chunks = match crate::db_call(move || db::mp_abort(&p, &uid)).await { Ok(c) => c, Err(e) => return e };

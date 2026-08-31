@@ -231,7 +231,7 @@ async fn put(State(a): State<App>, h: HeaderMap, uri: Uri, Path((bucket, key)): 
     let real_key = match scope_key(&cred, &bucket, &key) { Ok(k) => k, Err(e) => { storage::cleanup(&staged).await; return e; } };
     let ct = h.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("application/octet-stream").to_owned();
     let filename = key.rsplit('/').next().unwrap_or(&key).to_owned();
-    let chunks = match storage::upload(&a.client, &a.cfg, &staged, 0, &filename, &ct).await {
+    let chunks = match storage::upload(&a.client, &a.cfg, &staged.chunks, 0, &filename, &ct, true).await {
         Ok(c) => c,
         Err(e) => { error!(%e, "telegram upload failed"); return err(StatusCode::BAD_GATEWAY, "TelegramError", "Telegram upload failed"); }
     };
