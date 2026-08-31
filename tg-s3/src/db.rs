@@ -57,6 +57,17 @@ pub fn init(path: &Path) -> Result<(), DbError> {
             message_id INTEGER NOT NULL, file_id TEXT NOT NULL,
             size INTEGER NOT NULL, PRIMARY KEY(upload_id,idx));
     ")?;
+    // --- migration: DBs created by v1.0 lack mp_chunks.part_number (v1.1 writes 6 cols) ---
+    {
+        let has_pn: i64 = c.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('mp_chunks') WHERE name='part_number'",
+            [], |r| r.get(0))?;
+        if has_pn == 0 {
+            c.execute("ALTER TABLE mp_chunks ADD COLUMN part_number INTEGER NOT NULL DEFAULT 0", [])?;
+            // v1.0 stored one TG chunk per multipart part, so idx maps 1:1 to part_number.
+            c.execute("UPDATE mp_chunks SET part_number = idx + 1 WHERE part_number = 0", [])?;
+        }
+    }
     c.execute("INSERT OR IGNORE INTO buckets(name,created_at) VALUES('default', strftime('%s','now'))", [])?;
     Ok(())
 }
@@ -251,8 +262,55 @@ pub fn mp_reserve(path: &Path, upload_id: &str, n_chunks: i64) -> Result<i64, Db
 }
 pub fn mp_insert_chunk(path: &Path, upload_id: &str, idx: i64, part_number: i64, message_id: i64, file_id: &str, size: i64) -> Result<(), DbError> {
     let c = Connection::open(path)?;
-    c.execute("INSERT INTO mp_chunks VALUES(?,?,?,?,?,?)", params![upload_id, idx, part_number, message_id, file_id, size])?;
+    c.execute("INSERT INTO mp_chunks(upload_id,idx,part_number,message_id,file_id,size) VALUES(?,?,?,?,?,?)", params![upload_id, idx, part_number, message_id, file_id, size])?;
     Ok(())
+}
+/// Album mode: persist a just-staged UploadPart BEFORE returning 200 OK. Writes the
+/// chunk rows (message_id=0 + file_id holding the on-disk stage path; the real
+/// message_id/file_id are filled in when Complete pushes the album) and the
+/// multipart_parts bookkeeping row in one transaction, replacing the old
+/// mp_insert_chunk-per-chunk + mp_advance two-step.
+pub fn mp_stage_part(path: &Path, upload_id: &str, part_number: i64, etag: &str, part_size: i64, rows: &[ChunkRef], staged_paths: &[String]) -> Result<(), DbError> {
+    let mut c = Connection::open(path)?;
+    let tx = c.transaction()?;
+    for (r, p) in rows.iter().zip(staged_paths.iter()) {
+        tx.execute("INSERT INTO mp_chunks(upload_id,idx,part_number,message_id,file_id,size) VALUES(?,?,?,?,?,?)",
+            params![upload_id, r.idx, part_number, r.message_id, p, r.size])?;
+    }
+    let first_chunk_idx = rows.first().map(|r| r.idx).unwrap_or(0);
+    let chunk_count = rows.len() as i64;
+    tx.execute("INSERT OR REPLACE INTO multipart_parts(upload_id,part_number,etag,size,first_chunk_idx,chunk_count) VALUES(?,?,?,?,?,?)",
+        params![upload_id, part_number, etag, part_size, first_chunk_idx, chunk_count])?;
+    tx.execute("UPDATE multipart_uploads SET bytes_so_far=bytes_so_far+?, parts_uploaded=parts_uploaded+1 WHERE upload_id=?",
+        params![part_size, upload_id])?;
+    tx.commit()?;
+    Ok(())
+}
+/// Album mode: swap in the real Telegram identities for completed chunks whose
+/// message_id is still 0 (staged on disk). `triples` is (idx, message_id, file_id).
+pub fn mp_fill_album_results(path: &Path, upload_id: &str, triples: &[(i64, i64, String)]) -> Result<(), DbError> {
+    let mut c = Connection::open(path)?;
+    let tx = c.transaction()?;
+    for (idx, message_id, file_id) in triples {
+        tx.execute("UPDATE mp_chunks SET message_id=?, file_id=? WHERE upload_id=? AND idx=? AND message_id=0",
+            params![message_id, file_id, upload_id, idx])?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+/// Album mode: read an upload's staged chunk rows as (idx, message_id, size, stage_path,
+/// part_number). Rows staged on disk carry message_id=0 and the stage path in file_id;
+/// already-pushed rows (message_id>0, real file_id) are included too so Complete can
+/// skip/keep them correctly -- the caller filters on part_number.
+pub fn mp_get_staged_chunks_pn(path: &Path, upload_id: &str) -> Result<Vec<(i64, i64, i64, String, i64)>, DbError> {
+    let c = Connection::open(path)?;
+    let mut stmt = c.prepare("SELECT idx,message_id,size,file_id,part_number FROM mp_chunks WHERE upload_id=? ORDER BY idx")?;
+    let mut rows = stmt.query([upload_id])?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next()? {
+        out.push((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, String>(3)?, r.get::<_, i64>(4)?));
+    }
+    Ok(out)
 }
 pub fn mp_advance(path: &Path, upload_id: &str, part_number: i64, etag: &str, part_size: i64, first_chunk_idx: i64, chunk_count: i64) -> Result<(), DbError> {
     let mut c = Connection::open(path)?;

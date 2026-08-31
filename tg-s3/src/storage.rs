@@ -82,14 +82,31 @@ pub async fn cleanup_chunks(chunks: &[StagedChunk]) {
 /// (`start_idx + i`) unless `single_chunk_object` is set and this is the only chunk,
 /// so fragments stay identifiable in the Telegram channel.
 pub async fn upload(client: &Client, cfg: &Config, chunks: &[StagedChunk], start_idx: i64, filename: &str, content_type: &str, single_chunk_object: bool) -> Result<Vec<crate::db::ChunkRef>, telegram::TgError> {
-    let mut out = Vec::with_capacity(chunks.len());
-    for (i, ch) in chunks.iter().enumerate() {
-        let global_idx = start_idx + i as i64;
-        let name = if single_chunk_object && chunks.len() == 1 { filename.to_owned() } else { format!("{filename}.part{global_idx:05}") };
-        let up = telegram::upload(client, &cfg.bot_token, &cfg.chat_id, &ch.path, &name, content_type).await?;
-        out.push(crate::db::ChunkRef { idx: global_idx, message_id: up.message_id, file_id: up.file_id, size: ch.plain_size });
-        let _ = fs::remove_file(&ch.path).await;
+    // Single chunk: keep the plain filename (no .partNNNNN suffix).
+    if single_chunk_object && chunks.len() == 1 {
+        let up = telegram::upload(client, &cfg.bot_token, &cfg.chat_id, &chunks[0].path, filename, content_type).await?;
+        let _ = fs::remove_file(&chunks[0].path).await;
+        if let Some(dir) = chunks[0].path.parent() { let _ = fs::remove_dir(dir).await; }
+        return Ok(vec![crate::db::ChunkRef { idx: start_idx, message_id: up.message_id, file_id: up.file_id, size: chunks[0].plain_size }]);
     }
+    // 2..=10 chunks: one sendMediaGroup album call instead of N sendDocument calls
+    // (the S3 single-shot PUT path also lands here when the body exceeded
+    // CHUNK_SIZE_BYTES). A 10-item group is Telegram's album maximum, so anything
+    // larger still needs batching -- see the loop below, which handles every size.
+    let mut out = Vec::with_capacity(chunks.len());
+    for group in chunks.chunks(10) {
+        let items: Vec<telegram::AlbumItem> = group.iter().enumerate().map(|(i, ch)| {
+            let global_idx = start_idx + (out.len() + i) as i64;
+            telegram::AlbumItem { path: ch.path.clone(), filename: format!("{filename}.part{global_idx:05}") }
+        }).collect();
+        let ups = telegram::upload_album(client, &cfg.bot_token, &cfg.chat_id, &items, content_type).await?;
+        for (up, ch) in ups.into_iter().zip(group.iter()) {
+            out.push(crate::db::ChunkRef { idx: 0, message_id: up.message_id, file_id: up.file_id, size: ch.plain_size });
+            let _ = fs::remove_file(&ch.path).await;
+        }
+    }
+    // idx must reflect each chunk's global position; out was filled in order.
+    for (i, r) in out.iter_mut().enumerate() { r.idx = start_idx + i as i64; }
     if let Some(dir) = chunks.first().and_then(|c| c.path.parent()) { let _ = fs::remove_dir(dir).await; }
     Ok(out)
 }

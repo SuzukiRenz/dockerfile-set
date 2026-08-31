@@ -1,5 +1,16 @@
 mod admin; mod auth; mod cli; mod config; mod crypto; mod db; mod multipart; mod storage; mod telegram; mod util;
 
+/// Format a unix timestamp (seconds) as an RFC 7231 IMF-fixdate string for the
+/// Last-Modified header. OpenList/AWS SDK clients dereference LastModified on
+/// HEAD responses, so this header must always be present.
+fn httpdate_fmt(unix_secs: i64) -> String {
+    use chrono::TimeZone;
+    match chrono::Utc.timestamp_opt(unix_secs, 0).single() {
+        Some(dt) => dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string(),
+        None => "Thu, 01 Jan 1970 00:00:00 GMT".to_string(),
+    }
+}
+
 use axum::{
     body::{Body, Bytes},
     extract::{Path, Query, State},
@@ -414,6 +425,7 @@ async fn get(State(a): State<App>, h: HeaderMap, uri: Uri, Path((bucket, key)): 
     let hm = response.headers_mut();
     hm.insert(axum::http::header::CONTENT_TYPE, hv(&o.content_type));
     hm.insert(axum::http::header::ETAG, hv(&format!("\"{}\"", o.etag)));
+    hm.insert(axum::http::header::LAST_MODIFIED, hv(&httpdate_fmt(o.updated_at)));
     hm.insert(axum::http::header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     if partial {
         hm.insert(axum::http::header::CONTENT_RANGE, hv(&format!("bytes {}-{}/{}", start, end, o.size)));
@@ -444,7 +456,7 @@ async fn head(State(a): State<App>, h: HeaderMap, uri: Uri, Path((bucket, key)):
     let p = a.cfg.database_path.clone();
     match db_call(move || db::get_object(&p, &bucket, &real_key)).await {
         Ok(Some(o)) => {
-            let mut hdrs = vec![(axum::http::header::CONTENT_LENGTH, o.size.to_string()), (axum::http::header::CONTENT_TYPE, o.content_type), (axum::http::header::ETAG, format!("\"{}\"", o.etag))];
+            let mut hdrs = vec![(axum::http::header::CONTENT_LENGTH, o.size.to_string()), (axum::http::header::CONTENT_TYPE, o.content_type), (axum::http::header::ETAG, format!("\"{}\"", o.etag)), (axum::http::header::LAST_MODIFIED, httpdate_fmt(o.updated_at))];
             if let Some(alg) = &o.sse_algorithm { hdrs.push((HeaderName::from_static("x-amz-server-side-encryption"), alg.clone())); }
             resp_with_headers(StatusCode::OK, hdrs)
         }
@@ -586,6 +598,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let a = App { cfg: Arc::new(c.clone()), client: reqwest::Client::builder().build()? };
+    // Orphan sweep: any stage dir left in TEMP_DIR from a crash mid-multipart is
+    // garbage (nothing references it -- in-flight uploads only survive inside a
+    // request handler). Safe to remove everything at boot, before serving.
+    match fs::read_dir(&c.temp_dir).await {
+        Ok(mut rd) => {
+            let mut n = 0u32;
+            while let Ok(Some(e)) = rd.next_entry().await {
+                if e.path().is_dir() { let _ = fs::remove_dir_all(e.path()).await; n += 1; }
+            }
+            if n > 0 { info!("orphan sweep: removed {n} stale stage dirs from {}", c.temp_dir.display()); }
+        }
+        Err(_) => {}
+    }
     tokio::spawn(admin::run_scheduler(a.cfg.clone()));
     let r = Router::new()
         .route("/", route_get(buckets))

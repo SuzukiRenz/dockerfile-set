@@ -9,6 +9,7 @@ use axum::{
 use chrono::Utc;
 use http_body_util::BodyExt;
 use sha2::{Digest, Sha256};
+use std::path::PathBuf;
 use tracing::error;
 
 pub async fn create(a: App, cred: Credential, h: HeaderMap, bucket: String, real_key: String, client_key: String) -> Response {
@@ -83,25 +84,28 @@ pub async fn upload_part(a: App, h: HeaderMap, uri: Uri, upload_id: String, part
         Ok(v) => v,
         Err(e) => { storage::cleanup(&staged).await; return e; }
     };
-    let filename = mp.key.rsplit('/').next().unwrap_or(&mp.key).to_owned();
-    let chunks = match storage::upload(&a.client, &a.cfg, &staged.chunks, first_idx, &filename, &mp.content_type, false).await {
-        Ok(c) => c,
-        Err(e) => { error!(%e, "telegram upload (multipart part)"); return err(StatusCode::BAD_GATEWAY, "TelegramError", "Telegram upload failed"); }
-    };
-    for ch in &chunks {
-        let (p2, u2, idx, mid, fid, sz) = (a.cfg.database_path.clone(), upload_id.clone(), ch.idx, ch.message_id, ch.file_id.clone(), ch.size);
-        if let Err(e) = crate::db_call(move || db::mp_insert_chunk(&p2, &u2, idx, part_number, mid, &fid, sz)).await {
-            storage::rollback_uploaded(&a.client, &a.cfg, &chunks).await;
-            return e;
-        }
+    // Album mode: parts are NOT pushed to Telegram here. Files stay on disk until
+    // Complete, which batches them into sendMediaGroup calls (<=10 docs per album).
+    // next_chunk_idx is still reserved now so concurrent parts get disjoint indices;
+    // the per-part DB rows are written at Complete time from the staged layout.
+    let mut rows: Vec<crate::db::ChunkRef> = Vec::with_capacity(staged.chunks.len());
+    for (i, ch) in staged.chunks.iter().enumerate() {
+        rows.push(crate::db::ChunkRef { idx: first_idx + i as i64, message_id: 0, file_id: String::new(), size: ch.plain_size });
     }
-    let chunk_count = chunks.len() as i64;
+    let part_size = staged.total_size;
     let etag = staged.sha256_hex.clone();
-    let (p, u2, etag2, part_size) = (a.cfg.database_path.clone(), upload_id.clone(), etag.clone(), staged.total_size);
-    match crate::db_call(move || db::mp_advance(&p, &u2, part_number, &etag2, part_size, first_idx, chunk_count)).await {
-        Ok(_) => ([(axum::http::header::ETAG, format!("\"{etag}\""))], StatusCode::OK).into_response(),
-        Err(e) => { storage::rollback_uploaded(&a.client, &a.cfg, &chunks).await; e }
+    // Persist the staged files' locations BEFORE the 200 OK: after this returns the
+    // client may immediately send CompleteMultipartUpload, and that call must be able
+    // to find the staged paths. mp_stage_part writes mp_chunks (message_id=0 marks
+    // "staged on disk, path below") and multipart_parts in one transaction.
+    let (p, u2) = (a.cfg.database_path.clone(), upload_id.clone());
+    let staged_paths: Vec<String> = staged.chunks.iter().map(|c| c.path.to_string_lossy().into_owned()).collect();
+    let etag2 = etag.clone();
+    if let Err(e) = crate::db_call(move || db::mp_stage_part(&p, &u2, part_number, &etag2, part_size, &rows, &staged_paths)).await {
+        storage::cleanup(&staged).await;
+        return e;
     }
+    ([(axum::http::header::ETAG, format!("\"{etag}\""))], StatusCode::OK).into_response()
 }
 
 pub async fn complete(a: App, h: HeaderMap, uri: Uri, upload_id: String, body: Body) -> Response {
@@ -144,12 +148,68 @@ pub async fn complete(a: App, h: HeaderMap, uri: Uri, upload_id: String, body: B
     }
     let final_etag = format!("{}-{}", crate::util::hex(&hasher.finalize()), claimed.part.len());
     let now = Utc::now().timestamp();
+    // --- Album mode: push staged parts to Telegram now, in chunk order, <=10 per album ---
+    // mp_chunks currently holds stage paths in file_id with message_id=0. Read them,
+    // filter to the parts being completed, group by 10, sendMediaGroup each group,
+    // then swap real message_id/file_id in.
+    let p = a.cfg.database_path.clone();
+    let uid = upload_id.clone();
+    let staged: Vec<(i64, i64, i64, String, i64)> = match crate::db_call(move || db::mp_get_staged_chunks_pn(&p, &uid)).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let mut to_push: Vec<(i64, i64, i64, String, i64)> = staged.into_iter().filter(|(_, _, _, _, pn)| part_numbers.contains(pn)).collect();
+    to_push.sort_by_key(|r| r.0);
+    let filename = mp.key.rsplit('/').next().unwrap_or(&mp.key).to_owned();
+    let mut uploaded_any = false;
+    let mut pushed: Vec<(i64, i64, String)> = Vec::with_capacity(to_push.len());
+    for group in to_push.chunks(10) {
+        // group: (idx, message_id, size, stage_path, part_number)
+        let items: Vec<telegram::AlbumItem> = group.iter().map(|(idx, _, _, path, _)|
+            telegram::AlbumItem { path: PathBuf::from(path), filename: format!("{filename}.part{idx:05}") }).collect();
+        let ct = if mp.content_type.is_empty() { "application/octet-stream" } else { mp.content_type.as_str() };
+        match telegram::upload_album(&a.client, &a.cfg.bot_token, &a.cfg.chat_id, &items, ct).await {
+            Ok(ups) => {
+                uploaded_any = true;
+                for ((idx, _, _, _, _), up) in group.iter().zip(ups.into_iter()) {
+                    pushed.push((*idx, up.message_id, up.file_id));
+                }
+            }
+            Err(e) => {
+                error!(%e, "telegram album upload (multipart complete)");
+                // Roll back any albums already pushed so nothing leaks in the channel.
+                if uploaded_any {
+                    let ids: Vec<i64> = pushed.iter().map(|(_, mid, _)| *mid).collect();
+                    telegram::delete_messages(&a.client, &a.cfg.bot_token, &a.cfg.chat_id, ids).await;
+                }
+                return err(StatusCode::BAD_GATEWAY, "TelegramError", "Telegram upload failed");
+            }
+        }
+    }
+    // All albums landed: persist real identities, then run the original completion
+    // transaction (object_chunks rebuild from mp_chunks + bookkeeping cleanup).
+    let (p, u2) = (a.cfg.database_path.clone(), upload_id.clone());
+    let pushed2 = pushed.clone();
+    if let Err(e) = crate::db_call(move || db::mp_fill_album_results(&p, &u2, &pushed2)).await {
+        let ids: Vec<i64> = pushed.iter().map(|(_, mid, _)| *mid).collect();
+        telegram::delete_messages(&a.client, &a.cfg.bot_token, &a.cfg.chat_id, ids).await;
+        return e;
+    }
     let p = a.cfg.database_path.clone();
     let uid = upload_id.clone();
     let (mp2, etag2) = (mp.clone(), final_etag.clone());
     match crate::db_call(move || db::mp_complete(&p, &uid, &mp2, &part_numbers, total_size, &etag2, now)).await {
-        Ok(_) => xml(format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><CompleteMultipartUploadResult><Bucket>{}</Bucket><Key>{}</Key><ETag>&quot;{}&quot;</ETag></CompleteMultipartUploadResult>", esc(&mp.bucket), esc(&mp.key), esc(&final_etag))),
-        Err(e) => e,
+        Ok(_) => {
+            // DB is consistent; local stage files are no longer needed.
+            let dirs: std::collections::HashSet<PathBuf> = to_push.iter().map(|(_, _, _, path, _)| PathBuf::from(path).parent().map(|p| p.to_path_buf()).unwrap_or_default()).collect();
+            for d in dirs { let _ = tokio::fs::remove_dir_all(d).await; }
+            xml(format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><CompleteMultipartUploadResult><Bucket>{}</Bucket><Key>{}</Key><ETag>&quot;{}&quot;</ETag></CompleteMultipartUploadResult>", esc(&mp.bucket), esc(&mp.key), esc(&final_etag)))
+        }
+        Err(e) => {
+            let ids: Vec<i64> = pushed.iter().map(|(_, mid, _)| *mid).collect();
+            telegram::delete_messages(&a.client, &a.cfg.bot_token, &a.cfg.chat_id, ids).await;
+            e
+        }
     }
 }
 
@@ -157,8 +217,19 @@ pub async fn abort(a: App, upload_id: String) -> Response {
     let p = a.cfg.database_path.clone();
     let uid = upload_id.clone();
     let chunks = match crate::db_call(move || db::mp_abort(&p, &uid)).await { Ok(c) => c, Err(e) => return e };
-    let ids: Vec<i64> = chunks.into_iter().map(|c| c.message_id).collect();
+    let ids: Vec<i64> = chunks.iter().filter(|c| c.message_id != 0).map(|c| c.message_id).collect();
     if !ids.is_empty() { telegram::delete_messages(&a.client, &a.cfg.bot_token, &a.cfg.chat_id, ids).await; }
+    // Album mode: staged-on-disk parts (message_id=0, stage path in file_id) never
+    // reached Telegram; drop their local files so nothing lingers in TEMP_DIR.
+    for c in chunks.iter().filter(|c| c.message_id == 0) {
+        let path = std::path::PathBuf::from(&c.file_id);
+        if path.starts_with(&a.cfg.temp_dir) { let _ = tokio::fs::remove_file(&path).await; }
+    }
+    if let Some(first) = chunks.iter().filter(|c| c.message_id == 0).next() {
+        if let Some(dir) = std::path::PathBuf::from(&first.file_id).parent().map(|p| p.to_path_buf()) {
+            if dir.starts_with(&a.cfg.temp_dir) { let _ = tokio::fs::remove_dir_all(dir).await; }
+        }
+    }
     StatusCode::NO_CONTENT.into_response()
 }
 
