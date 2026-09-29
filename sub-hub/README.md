@@ -1,127 +1,89 @@
-# sub-server
+# Sub Hub
 
-A single Docker container that combines:
+基于 Go 和 SQLite 的订阅节点集合服务，保留原项目的 subconverter 转换能力，并把原来的单层节点管理升级为主 Token、子 Token、集合授权、访问日志和备份恢复。
 
-- **sub-server** – a lightweight Go HTTP server that serves your self-built proxy
-  nodes as a subscription, replacing the CF-Workers-SUB Cloudflare Worker.
-- **subconverter** – the industry-standard converter that transforms raw proxy
-  links into Clash / Surge / SingBox / Quantumult-X / … formats.
+## 核心能力
 
-subconverter runs **internally only** (bound to `127.0.0.1:25500`). Its port is
-never exposed to the host or the internet. All third-party aggregation logic from
-the original CF-Workers-SUB is removed.
+- SQLite 持久化：节点、集合、Token、授权关系、日志和设置均在数据库中。
+- 主 Token：可管理全部资源，也可以限制只能访问指定集合。
+- 子 Token：可单独设置授权集合、过期时间、最大请求次数和备注。
+- 集合订阅：`/sub` 或 `/s/{token}/{collection}` 返回集合对应的 Base64 节点。
+- 客户端转换：支持 `target=clash`、`singbox`、`surge`、`quanx`、`loon`、`surfboard` 等参数。
+- 管理台：所有节点、集合、Token、链接、日志和备份按钮均有真实 API 支撑。
+- 旧数据兼容：数据库没有节点时，可回退读取 `NODES` 或 `nodes.txt`。
+- 旧版迁移：可直接在“设置与备份”导入原项目的 `db.json`，节点和订阅设置会写入 SQLite，现有主 Token 保留。
+- 新版备份：导出的 JSON 包含节点、集合、主/子 Token、授权关系与设置。
 
----
-
-## Quick start
+## 快速启动
 
 ```bash
-# 1. Clone / copy this directory
-git clone … && cd sub-server
-
-# 2. Configure
-cp .env.example .env
-$EDITOR .env           # set TOKEN (required) and optionally PORT / SUB_NAME
-
-# 3. Add your nodes
-$EDITOR data/nodes.txt # one proxy URI per line (vmess/vless/trojan/ss/…)
-
-# 4. Build and run
+cp env.example .env
+# 编辑 .env，至少修改 MASTER_TOKEN
 docker compose up -d --build
-
-# 5. Check logs
-docker compose logs -f
 ```
 
----
+打开：
 
-## Subscription URLs
-
-| Client type | URL |
-|---|---|
-| V2RayN / Xray / Nekoray (raw base64) | `http://HOST:PORT/?token=TOKEN` |
-| Clash / Mihomo | `http://HOST:PORT/?token=TOKEN&target=clash` |
-| Clash.Meta (new fields) | `http://HOST:PORT/?token=TOKEN&target=clash&new_name=true` |
-| Surge 4 | `http://HOST:PORT/?token=TOKEN&target=surge&ver=4` |
-| Surfboard | `http://HOST:PORT/?token=TOKEN&target=surfboard` |
-| Quantumult X | `http://HOST:PORT/?token=TOKEN&target=quanx` |
-| Loon | `http://HOST:PORT/?token=TOKEN&target=loon` |
-| SingBox | `http://HOST:PORT/?token=TOKEN&target=singbox` |
-
-`/sub` and `/` are both valid paths.
-
-### Extra parameters (forwarded to subconverter)
-
-| Parameter | Effect |
-|---|---|
-| `udp=true` | Enable UDP |
-| `tfo=true` | TCP Fast Open |
-| `scv=true` | Skip certificate verification |
-| `sort=true` | Sort nodes by name |
-| `expand=true` | Expand rule-sets inline |
-| `exclude=keyword` | Remove nodes whose name contains keyword |
-| `include=keyword` | Keep only nodes whose name contains keyword |
-
----
-
-## Adding nodes
-
-**Option A – Web UI (recommended for this build):**
-
-Open `/admin`, import or edit your nodes, and save. Nodes are persisted in
-`/data/db.json`. Subscription endpoints now read enabled nodes from `db.json`
-first, so nodes imported from the Web UI are immediately used by Passwall,
-Clash/Mihomo, Shadowrocket-compatible clients, and other subscription clients.
-
-Disabled nodes and empty/duplicate URIs are skipped automatically.
-
-**Option B – file fallback:**
-
-If no enabled nodes exist in `/data/db.json`, edit `data/nodes.txt` in the
-project directory. The file is re-read on every request – no restart needed.
-
-```
-vmess://eyJ2Ij...
-vless://uuid@host:443?...#NodeName
-trojan://pass@host:443#NodeName
+```text
+http://服务器地址:8787/admin
 ```
 
-**Option C – environment variable fallback:**
+首次启动时，`MASTER_TOKEN` 会写入 SQLite 作为启动主 Token。之后可以在管理台创建、禁用或轮换更多主 Token。
 
-Set `NODES` in `.env` (newline-separated or base64-encoded node list):
+## 订阅链接
 
-```dotenv
-NODES=vless://...#Node1
-trojan://...#Node2
+管理台“订阅链接”页面会直接生成真实链接：
+
+```text
+原始订阅： http://host:8787/sub?token=TOKEN
+指定集合： http://host:8787/sub?token=TOKEN&collections=hk,mobile
+路径形式： http://host:8787/s/TOKEN/hk
+Clash：    http://host:8787/sub?token=TOKEN&target=clash
+Sing-Box： http://host:8787/sub?token=TOKEN&target=singbox
 ```
 
-If Web UI nodes exist, `NODES`/`nodes.txt` are treated only as legacy fallback
-sources and are ignored for normal subscription generation.
+子 Token 只能访问其授权集合。每次成功获取订阅都会消耗一次使用次数，并记录访问日志。
 
----
+## 首次使用建议
 
-## Health check
+1. 登录后在“节点池”批量导入节点。
+2. 在“集合”中按地区、用途或客户创建集合。
+3. 在“Token”中创建子 Token，并勾选授权集合。
+4. 在“订阅链接”中选择 Token 和集合，复制客户端链接。
+5. 在“设置与备份”中下载 JSON 备份，保存 SQLite 业务数据；旧版 `db.json` 也可在同一处导入。
 
-```bash
-curl http://localhost:8080/health
-# {"nodes":3,"status":"ok"}
-```
+## 环境变量
 
----
-
-## Configuration reference
-
-| Variable | Default | Description |
+| 变量 | 默认值 | 说明 |
 |---|---|---|
-| `TOKEN` | `change-me-please` | Auth token appended to every subscription URL |
-| `PORT` | `8080` | Host port the Go server listens on |
-| `SUB_NAME` | `My Subscription` | Filename hint in Content-Disposition header |
-| `NODES_FILE` | `/data/nodes.txt` | Legacy fallback nodes file, used only when Web UI has no enabled nodes |
-| `NODES` | _(empty)_ | Legacy fallback inline nodes, newline-separated or base64-encoded |
+| `MASTER_TOKEN` | `change-me-please` | 首次初始化数据库时写入的主 Token |
+| `PORT` | `8787` | 服务监听端口 |
+| `DB_PATH` | `/data/sub-hub.db` | SQLite 数据库文件 |
+| `NODES_FILE` | `/data/nodes.txt` | 无可用数据库节点时的旧版回退文件 |
+| `NODES` | 空 | 旧版回退节点，支持换行或 Base64 |
+| `SUBCONVERTER_URL` | `http://127.0.0.1:25500` | 内部 subconverter 地址 |
+| `LOG_MAX_RECORDS` | `1000` | 保留的最大访问日志条数 |
 
-Subconverter configuration lives in `subconverter/pref.ini` and is baked into
-the image at build time. Re-build after changing it:
+## 本地开发
 
 ```bash
-docker compose up -d --build
+go mod tidy
+go test ./... -timeout 60s
+MASTER_TOKEN=dev-token DB_PATH=./data/dev.db go run .
 ```
+
+Windows PowerShell：
+
+```powershell
+$env:MASTER_TOKEN = "dev-token"
+$env:DB_PATH = ".\data\dev.db"
+go run .
+```
+
+## 数据与安全
+
+- SQLite 默认启用 WAL 和外键约束。
+- Token 在数据库中保存明文用于管理台展示，同时保存 SHA-256 指纹用于鉴权；如面向不受信任环境，建议只把管理台放在受保护的入口后。
+- 备份 JSON 包含 Token，需要按密钥文件保管。
+- 恢复备份会覆盖当前节点、集合、Token、授权和设置。
+- `subconverter` 只在容器内部监听 `127.0.0.1:25500`，不对外暴露。

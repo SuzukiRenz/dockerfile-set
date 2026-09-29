@@ -1,45 +1,28 @@
 services:
-  sub-server:
+  sub-hub:
     build:
       context: .
       args:
-        SUBCONVERTER_VERSION: "0.9.0"   # pin the subconverter release
-    image: sub-server:latest
-    container_name: sub-server
+        SUBCONVERTER_VERSION: "0.9.0"
+    image: sub-hub:latest
+    container_name: sub-hub
     restart: unless-stopped
 
     ports:
-      # External → internal subscription port.
-      # subconverter (25500) is intentionally NOT listed here.
       - "${PORT:-8787}:8787"
 
     environment:
-      # ── Required ──────────────────────────────────────────────────────────
-      # Authentication token for the subscription URL.
-      # Change this before deploying!
-      TOKEN: "${TOKEN:-change-me-please}"
-
-      # ── Optional ──────────────────────────────────────────────────────────
-      # Display name embedded in the Content-Disposition header.
-      SUB_NAME: "${SUB_NAME:-My Subscription}"
-
-      # Legacy fallback path. Normal Web UI imports are saved to /data/db.json
-      # and are used first by the subscription server.
-      # Override only if you change the volume mount below.
+      # Bootstrap token. Imported on first run when the SQLite database is empty.
+      MASTER_TOKEN: "${MASTER_TOKEN:-change-me-please}"
+      PORT: "8787"
+      DB_PATH: "/data/sub-hub.db"
       NODES_FILE: "/data/nodes.txt"
-
-      # Legacy fallback inline nodes (newline-separated proxy URIs).
-      # Web UI nodes in /data/db.json take priority when enabled nodes exist.
-      # NODES: |
-      #   vless://uuid@host:443?type=ws&security=tls#Node-1
-      #   trojan://password@host:443?type=tcp&security=tls#Node-2
+      SUBCONVERTER_URL: "http://127.0.0.1:25500"
+      LOG_MAX_RECORDS: "1000"
 
     volumes:
-      # Persist your nodes.txt and any custom rule files here.
       - ./data:/data
 
-    # Keep subconverter logs quieter; change to "info" for troubleshooting.
-    # (subconverter reads log_level from pref.ini, not env – this is for Docker)
     logging:
       driver: json-file
       options:

@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sub Hub</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <div id="login-view" class="login-shell">
+    <form id="login-form" class="login-card">
+      <div class="brand-mark">SH</div>
+      <h1>Sub Hub</h1>
+      <p>使用主 Token 登录管理台</p>
+      <label>
+        <span>主 Token</span>
+        <input id="login-token" type="password" autocomplete="current-password" placeholder="输入主 Token" required>
+      </label>
+      <button class="btn primary wide" type="submit">登录</button>
+      <div id="login-error" class="form-error"></div>
+    </form>
+  </div>
+
+  <div id="app-view" class="app-shell hidden">
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <div class="brand-mark small">SH</div>
+        <div><strong>Sub Hub</strong><small>订阅节点集合</small></div>
+      </div>
+      <nav id="main-nav">
+        <button class="nav-item active" data-page="dashboard"><span>概览</span></button>
+        <button class="nav-item" data-page="nodes"><span>节点池</span></button>
+        <button class="nav-item" data-page="collections"><span>集合</span></button>
+        <button class="nav-item" data-page="tokens"><span>Token</span></button>
+        <button class="nav-item" data-page="links"><span>订阅链接</span></button>
+        <button class="nav-item" data-page="logs"><span>访问日志</span></button>
+        <button class="nav-item" data-page="settings"><span>设置与备份</span></button>
+      </nav>
+      <div class="sidebar-footer">
+        <span id="principal-name">主 Token</span>
+        <button id="logout-btn" class="text-button">退出</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <h1 id="page-title">概览</h1>
+          <p id="page-subtitle">节点、集合与订阅状态</p>
+        </div>
+        <button id="refresh-btn" class="btn ghost" type="button">刷新</button>
+      </header>
+
+      <section id="page-dashboard" class="page active">
+        <div id="stat-grid" class="stat-grid"></div>
+        <div class="two-column">
+          <article class="panel">
+            <div class="panel-head"><div><h2>最近访问</h2><p>最新订阅请求记录</p></div></div>
+            <div id="dashboard-logs" class="compact-list"></div>
+          </article>
+          <article class="panel">
+            <div class="panel-head"><div><h2>集合状态</h2><p>当前授权与节点覆盖</p></div></div>
+            <div id="dashboard-collections" class="compact-list"></div>
+          </article>
+        </div>
+      </section>
+
+      <section id="page-nodes" class="page">
+        <div class="toolbar">
+          <div class="toolbar-left">
+            <input id="node-search" class="search" type="search" placeholder="搜索名称或 URI">
+            <label class="checkline"><input id="node-enabled-only" type="checkbox"> 仅看已启用</label>
+          </div>
+          <div class="toolbar-actions">
+            <button id="node-bulk-delete" class="btn danger ghost" type="button" disabled>批量删除</button>
+            <button id="node-import-btn" class="btn ghost" type="button">批量导入</button>
+            <button id="node-add-btn" class="btn primary" type="button">添加节点</button>
+          </div>
+        </div>
+        <article class="panel table-panel">
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th class="select-col"><input id="node-select-all" type="checkbox"></th>
+                  <th>名称</th>
+                  <th>节点 URI</th>
+                  <th>集合</th>
+                  <th>状态</th>
+                  <th class="actions-col">操作</th>
+                </tr>
+              </thead>
+              <tbody id="nodes-body"></tbody>
+            </table>
+          </div>
+          <div id="nodes-empty" class="empty hidden">暂无节点</div>
+        </article>
+      </section>
+
+      <section id="page-collections" class="page">
+        <div class="toolbar">
+          <div class="toolbar-left"><p class="muted">集合用于给不同 Token 分配不同节点组合。</p></div>
+          <button id="collection-add-btn" class="btn primary" type="button">新建集合</button>
+        </div>
+        <div id="collection-grid" class="card-grid"></div>
+        <div id="collections-empty" class="empty hidden">暂无集合</div>
+      </section>
+
+      <section id="page-tokens" class="page">
+        <div class="toolbar">
+          <div class="segmented" id="token-tabs">
+            <button class="active" data-token-tab="children" type="button">子 Token</button>
+            <button data-token-tab="masters" type="button">主 Token</button>
+          </div>
+          <button id="token-add-btn" class="btn primary" type="button">新建子 Token</button>
+        </div>
+        <article class="panel table-panel">
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>名称</th>
+                  <th>Token</th>
+                  <th>授权集合</th>
+                  <th>使用情况</th>
+                  <th>状态</th>
+                  <th class="actions-col">操作</th>
+                </tr>
+              </thead>
+              <tbody id="tokens-body"></tbody>
+            </table>
+          </div>
+          <div id="tokens-empty" class="empty hidden">暂无 Token</div>
+        </article>
+      </section>
+
+      <section id="page-links" class="page">
+        <article class="panel">
+          <div class="panel-head">
+            <div><h2>链接生成器</h2><p>选择 Token 和集合后复制对应客户端链接</p></div>
+          </div>
+          <div class="link-controls">
+            <label><span>服务器地址</span><input id="link-host" type="text" placeholder="https://example.com"></label>
+            <label><span>Token</span><select id="link-token"></select></label>
+            <label><span>集合范围</span><select id="link-collection"></select></label>
+          </div>
+          <div id="link-list" class="link-list"></div>
+        </article>
+      </section>
+
+      <section id="page-logs" class="page">
+        <div class="toolbar">
+          <div class="toolbar-left"><p class="muted">记录最近 1000 条订阅请求。</p></div>
+          <button id="logs-clear-btn" class="btn danger ghost" type="button">清空日志</button>
+        </div>
+        <article class="panel table-panel">
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>时间</th><th>Token</th><th>集合</th><th>客户端</th><th>节点</th><th>状态</th><th>IP</th></tr></thead>
+              <tbody id="logs-body"></tbody>
+            </table>
+          </div>
+          <div id="logs-empty" class="empty hidden">暂无访问记录</div>
+        </article>
+      </section>
+
+      <section id="page-settings" class="page">
+        <div class="two-column settings-grid">
+          <article class="panel">
+            <div class="panel-head"><div><h2>订阅设置</h2><p>全局下载名和转换器配置</p></div></div>
+            <form id="settings-form" class="form-stack">
+              <label><span>订阅名称</span><input id="setting-sub-name" type="text"></label>
+              <label><span>Subconverter 远程配置 URL</span><input id="setting-subconfig" type="url" placeholder="https://example.com/config.ini"></label>
+              <label><span>订阅更新间隔（小时）</span><input id="setting-interval" type="number" min="1" max="720"></label>
+              <label><span>Subscription-Userinfo</span><input id="setting-userinfo" type="text"></label>
+              <label class="checkline"><input id="setting-legacy" type="checkbox"> 允许旧版 NODES / nodes.txt 回退</label>
+              <button class="btn primary" type="submit">保存设置</button>
+            </form>
+          </article>
+          <article class="panel">
+            <div class="panel-head"><div><h2>备份与恢复</h2><p>导出 SQLite 中的节点、集合和 Token</p></div></div>
+            <div class="backup-actions">
+              <button id="backup-download" class="btn primary" type="button">下载 JSON 备份</button>
+              <label class="btn ghost file-button">导入备份<input id="backup-file" type="file" accept="application/json"></label>
+            </div>
+            <div class="notice">恢复会替换当前全部业务数据，请先下载备份。</div>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="modal-root"></div>
+  <div id="toast-root" class="toast-root"></div>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

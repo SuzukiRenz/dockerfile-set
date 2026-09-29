@@ -1,22 +1,24 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Stage 1 – Build Go subscription server
+# Stage 1 - Build Go subscription server
 # ─────────────────────────────────────────────────────────────────────────────
-FROM golang:1.22-alpine AS go-builder
+FROM golang:1.23-alpine AS go-builder
 
 WORKDIR /build
 
-RUN apk add --no-cache git
+RUN apk add --no-cache git ca-certificates
 
-# Copy all source first, then tidy (generates go.sum) and build in one pass
-COPY go/ .
-RUN go mod tidy && \
-    CGO_ENABLED=0 GOOS=linux \
-    go build -ldflags="-s -w" -trimpath -o sub-server .
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY *.go ./
+COPY web ./web
+RUN CGO_ENABLED=0 GOOS=linux \
+    go build -ldflags="-s -w" -trimpath -o sub-hub .
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stage 2 – Download subconverter binary  (amd64 / arm64 only)
+# Stage 2 - Download subconverter binary
 # ─────────────────────────────────────────────────────────────────────────────
-FROM alpine:3.19 AS sub-fetcher
+FROM alpine:3.20 AS sub-fetcher
 
 ARG TARGETARCH
 ARG SUBCONVERTER_VERSION=0.9.0
@@ -36,7 +38,7 @@ RUN case "${TARGETARCH}" in \
     chmod +x /opt/subconverter/subconverter
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stage 3 – Final runtime image
+# Stage 3 - Runtime
 # ─────────────────────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim
 
@@ -49,16 +51,16 @@ RUN apt-get update && \
         curl && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=go-builder  /build/sub-server        /usr/local/bin/sub-server
-COPY --from=sub-fetcher /opt/subconverter         /opt/subconverter
-COPY subconverter/pref.ini  /opt/subconverter/pref.ini
-COPY supervisord.conf        /etc/supervisor/conf.d/services.conf
+COPY --from=go-builder  /build/sub-hub        /usr/local/bin/sub-hub
+COPY --from=sub-fetcher /opt/subconverter     /opt/subconverter
+COPY subconverter/pref.ini /opt/subconverter/pref.ini
+COPY supervisord.conf /etc/supervisor/conf.d/services.conf
 
 RUN mkdir -p /data
 VOLUME ["/data"]
 
-# TOKEN/GUEST 不在此设默认值，避免 secrets 警告，统一由 docker-compose 传入
 ENV PORT="8787"
+ENV DB_PATH="/data/sub-hub.db"
 
 EXPOSE 8787
 
