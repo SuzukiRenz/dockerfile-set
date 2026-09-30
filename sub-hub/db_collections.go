@@ -320,7 +320,7 @@ func (d *DB) accessibleCollections(ctx context.Context, principal *Principal) ([
 func (d *DB) NodeURIsForCollections(ctx context.Context, collectionIDs []int64) ([]string, error) {
 	collectionIDs = uniqueInt64s(collectionIDs)
 	if len(collectionIDs) == 0 {
-		return nil, ErrNoNodes
+		return d.ListEnabledNodeURIs(ctx)
 	}
 	query, args := sqlInQuery(
 		`SELECT cn.collection_id, cn.position, n.id, n.uri

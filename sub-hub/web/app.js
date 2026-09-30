@@ -435,8 +435,8 @@ function batchModal() {
   modal({
     title: '批量导入节点',
     body: `
-      <label><span>每行一个节点 URI，也支持 Base64 订阅文本</span>
-        <textarea id="modal-batch" placeholder="vless://...&#10;trojan://..."></textarea>
+      <label><span>支持标准 URI、Base64 订阅、小火箭 JSON 和小火箭分享链接</span>
+        <textarea id="modal-batch" rows="12" placeholder="vless://...&#10;trojan://...&#10;或粘贴小火箭 JSON / shadowrocket:// 分享链接"></textarea>
       </label>
     `,
     submitText: '导入',
@@ -445,7 +445,7 @@ function batchModal() {
       if (!uris) throw new Error('请粘贴节点内容');
       const result = await api('/api/nodes/batch', { method: 'POST', body: { uris } });
       await loadAll();
-      toast(`导入 ${result.imported} 个，跳过 ${result.skipped} 个`);
+      toast(`${result.format_label || '节点'}：导入 ${result.imported} 个，跳过 ${result.skipped} 个`);
     },
   });
 }

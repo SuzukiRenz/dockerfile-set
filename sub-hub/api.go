@@ -277,12 +277,12 @@ func (a *App) handleNodesBatch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	added, skipped, err := a.db.BatchCreateNodes(r.Context(), request.URIs)
+	result, err := a.db.BatchCreateNodes(r.Context(), request.URIs)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"imported": added, "skipped": skipped})
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (a *App) handleNodesReorder(w http.ResponseWriter, r *http.Request) {
