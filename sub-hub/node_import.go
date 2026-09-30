@@ -286,6 +286,9 @@ func jsonKeyNodeType(key string) string {
 
 func jsonMapToNodeURI(node map[string]any, defaultType string) (string, bool) {
 	server := firstString(node, "server", "address", "add", "server_host", "hostname")
+	if server == "" {
+		server = firstString(node, "host")
+	}
 	port := firstInt(node, "port", "server_port", "serverport", "remote_port")
 	if server == "" || port <= 0 {
 		return "", false
@@ -335,7 +338,7 @@ func jsonMapToNodeURI(node map[string]any, defaultType string) (string, bool) {
 	}
 	tlsValue := firstValue(node, "tls", "stream_security", "streamsecurity", "over_tls", "overtls", "tls_enabled", "tlsenabled")
 	tlsEnabled := truthy(tlsValue)
-	sni := firstString(node, "sni", "server_name", "servername", "peer", "tls_host", "tlshost")
+	sni := firstString(node, "sni", "server_name", "servername", "peer", "tls_host", "tlshost", "peername")
 	if tlsConfig := firstMap(node, "tls"); len(tlsConfig) > 0 {
 		if !hasValue(tlsValue) {
 			tlsEnabled = truthy(firstValue(tlsConfig, "enabled", "value", "secure"))
@@ -407,10 +410,7 @@ func jsonMapToNodeURI(node map[string]any, defaultType string) (string, bool) {
 }
 
 func buildVMessURI(node map[string]any, name, server string, port int, network, path, host string, tlsEnabled bool, sni string) (string, bool) {
-	identifier := firstString(node, "uuid", "id", "user_id", "userid")
-	if identifier == "" {
-		identifier = firstString(node, "password", "pass")
-	}
+	identifier := preferredProxyIdentifier(node)
 	if identifier == "" {
 		return "", false
 	}
@@ -449,10 +449,7 @@ func buildVMessURI(node map[string]any, name, server string, port int, network, 
 }
 
 func buildVLESSURI(node map[string]any, name, server string, port int, network, path, host string, tlsEnabled bool, sni string) (string, bool) {
-	identifier := firstString(node, "uuid", "id", "user_id", "userid")
-	if identifier == "" {
-		identifier = firstString(node, "password", "pass")
-	}
+	identifier := preferredProxyIdentifier(node)
 	if identifier == "" {
 		return "", false
 	}
@@ -469,11 +466,11 @@ func buildVLESSURI(node map[string]any, name, server string, port int, network, 
 		setQuery(query, "sid", firstString(node, "short_id", "shortid", "sid"))
 		setQuery(query, "spx", firstString(node, "spider_x", "spiderx", "spx"))
 	}
-	setQuery(query, "flow", firstString(node, "flow"))
+	setQuery(query, "flow", vlessFlow(node))
 	setQuery(query, "host", host)
 	setQuery(query, "path", path)
 	setQuery(query, "sni", sni)
-	setQuery(query, "fp", firstString(node, "fingerprint", "fp"))
+	setQuery(query, "fp", firstString(node, "fingerprint", "fp", "tls_profile", "tlsprofile"))
 	setQuery(query, "alpn", normalizeListValue(firstValue(node, "alpn")))
 	setQuery(query, "headerType", firstString(node, "header_type", "headertype"))
 	if firstBool(node, "allow_insecure", "allowinsecure", "skip_cert_verify", "skipcertverify", "scv") {
@@ -497,7 +494,7 @@ func buildTrojanURI(node map[string]any, name, server string, port int, network,
 	setQuery(query, "host", host)
 	setQuery(query, "path", path)
 	setQuery(query, "sni", sni)
-	setQuery(query, "fp", firstString(node, "fingerprint", "fp"))
+	setQuery(query, "fp", firstString(node, "fingerprint", "fp", "tls_profile", "tlsprofile"))
 	setQuery(query, "alpn", normalizeListValue(firstValue(node, "alpn")))
 	if firstBool(node, "allow_insecure", "allowinsecure", "skip_cert_verify", "skipcertverify", "scv") {
 		query.Set("allowInsecure", "1")
@@ -624,7 +621,7 @@ func buildAnyTLSURI(node map[string]any, name, server string, port int, sni stri
 	query := url.Values{}
 	query.Set("security", "tls")
 	setQuery(query, "sni", sni)
-	setQuery(query, "fp", firstString(node, "fingerprint", "fp"))
+	setQuery(query, "fp", firstString(node, "fingerprint", "fp", "tls_profile", "tlsprofile"))
 	if firstBool(node, "allow_insecure", "allowinsecure", "skip_cert_verify", "skipcertverify", "scv") {
 		query.Set("allowInsecure", "1")
 	}
@@ -673,30 +670,7 @@ func canonicalizeNodeURI(raw string) string {
 	if strings.HasPrefix(strings.ToLower(raw), "hy2://") {
 		return "hysteria2://" + raw[len("hy2://"):]
 	}
-	if !strings.HasPrefix(strings.ToLower(raw), "vmess://") || !strings.Contains(raw, "@") {
-		return raw
-	}
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.User == nil || parsed.Hostname() == "" {
-		return raw
-	}
-	port, err := strconv.Atoi(parsed.Port())
-	if err != nil || port <= 0 {
-		return raw
-	}
-	node := map[string]any{
-		"type":    "vmess",
-		"uuid":    parsed.User.Username(),
-		"server":  parsed.Hostname(),
-		"port":    port,
-		"network": parsed.Query().Get("type"),
-		"path":    parsed.Query().Get("path"),
-		"host":    parsed.Query().Get("host"),
-		"tls":     parsed.Query().Get("security"),
-		"sni":     parsed.Query().Get("sni"),
-		"name":    parsed.Fragment,
-	}
-	if uri, ok := jsonMapToNodeURI(node, "vmess"); ok {
+	if uri, ok := expandShadowrocketAuthorityURI(raw); ok {
 		return uri
 	}
 	return raw
@@ -970,5 +944,116 @@ func nodeImportError(format string) error {
 		return fmt.Errorf("小火箭分享链接中没有可离线解析的节点")
 	default:
 		return fmt.Errorf("没有识别到有效节点")
+	}
+}
+func expandShadowrocketAuthorityURI(raw string) (string, bool) {
+	lower := strings.ToLower(raw)
+	if !strings.HasPrefix(lower, "vless://") && !strings.HasPrefix(lower, "vmess://") {
+		return "", false
+	}
+	schemeEnd := strings.Index(raw, "://")
+	if schemeEnd < 0 {
+		return "", false
+	}
+	scheme := strings.ToLower(raw[:schemeEnd])
+	rest := raw[schemeEnd+3:]
+	fragment := ""
+	if hash := strings.Index(rest, "#"); hash >= 0 {
+		fragment = rest[hash+1:]
+		rest = rest[:hash]
+	}
+	queryText := ""
+	if query := strings.Index(rest, "?"); query >= 0 {
+		queryText = rest[query+1:]
+		rest = rest[:query]
+	}
+	decoded, ok := decodeBase64Text(rest)
+	if !ok {
+		return "", false
+	}
+	decoded = strings.TrimSpace(decoded)
+	if !strings.Contains(decoded, "@") {
+		return "", false
+	}
+	parts := strings.SplitN(decoded, "@", 2)
+	userInfo := strings.TrimPrefix(parts[0], ":")
+	endpoint := parts[1]
+	lastColon := strings.LastIndex(endpoint, ":")
+	if lastColon <= 0 || lastColon == len(endpoint)-1 {
+		return "", false
+	}
+	server := strings.Trim(endpoint[:lastColon], "[]")
+	port, err := strconv.Atoi(endpoint[lastColon+1:])
+	if err != nil || port <= 0 || server == "" || userInfo == "" {
+		return "", false
+	}
+	query, err := url.ParseQuery(queryText)
+	if err != nil {
+		return "", false
+	}
+	name := ""
+	if fragment != "" {
+		name, _ = url.QueryUnescape(fragment)
+	}
+	node := map[string]any{
+		"type":     scheme,
+		"server":   server,
+		"port":     port,
+		"name":     firstNonEmpty(name, query.Get("remarks"), query.Get("remark")),
+		"network":  firstNonEmpty(query.Get("type"), query.Get("net"), query.Get("obfs")),
+		"path":     query.Get("path"),
+		"host":     query.Get("host"),
+		"sni":      firstNonEmpty(query.Get("sni"), query.Get("peer")),
+		"tls":      firstNonEmpty(query.Get("security"), query.Get("tls")),
+		"pbk":      query.Get("pbk"),
+		"sid":      query.Get("sid"),
+		"fp":       query.Get("fingerprint"),
+		"xtls":     query.Get("xtls"),
+		"security": query.Get("security"),
+	}
+	node["uuid"] = userInfo
+	return jsonMapToNodeURI(node, scheme)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+var uuidRegex = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+
+func preferredProxyIdentifier(node map[string]any) string {
+	candidates := []string{
+		firstString(node, "uuid", "id", "user_id", "userid"),
+		firstString(node, "password", "pass"),
+	}
+	for _, candidate := range candidates {
+		if uuidRegex.MatchString(candidate) {
+			return candidate
+		}
+	}
+	for _, candidate := range candidates {
+		if candidate != "" {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func vlessFlow(node map[string]any) string {
+	if flow := firstString(node, "flow"); flow != "" {
+		return flow
+	}
+	switch firstString(node, "xtls") {
+	case "1":
+		return "xtls-rprx-direct"
+	case "2":
+		return "xtls-rprx-vision"
+	default:
+		return ""
 	}
 }
