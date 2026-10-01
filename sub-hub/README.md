@@ -13,6 +13,7 @@
 - 旧数据兼容：数据库没有节点时，可回退读取 `NODES` 或 `nodes.txt`。
 - 旧版迁移：可直接在“设置与备份”导入原项目的 `db.json`，节点和订阅设置会写入 SQLite，现有主 Token 保留。
 - 节点导入：支持标准节点 URI、Base64 订阅、小火箭 JSON、多节点 JSON、`shadowrocket://` 分享链接；导入后会统一规范化为标准 URI，再由 `/sub` 输出标准 Base64 订阅。
+- 访客转换页：域名根路径提供公开的订阅格式转换工具，支持小火箭 JSON、VLESS/VMess 变体、Base64 和标准 URI；每次转换需要完成一题简单算术验证。
 - 新版备份：导出的 JSON 包含节点、集合、主/子 Token、授权关系与设置。
 
 ## 快速启动
@@ -26,10 +27,19 @@ docker compose up -d --build
 打开：
 
 ```text
+访客工具： http://服务器地址:8787/
 http://服务器地址:8787/admin
 ```
 
+根路径是访客可直接使用的订阅格式转换页，左上角的人形按钮进入管理台登录页。公开转换只在内存中处理，不写入 SQLite。
+
 首次启动时，`MASTER_TOKEN` 会写入 SQLite 作为启动主 Token。之后可以在管理台创建、禁用或轮换更多主 Token。
+
+## 公开转换接口
+
+- `POST /api/public/challenge`：获取一道加法或减法验证题。
+- `POST /api/public/convert`：提交 `token`、`answer`、`input`、`target` 执行转换。
+- 验证题有效期 5 分钟且只能使用一次；单次最多转换 500 个节点。
 
 ## 订阅链接
 

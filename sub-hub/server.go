@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -20,13 +21,20 @@ type App struct {
 	config Config
 	db     *DB
 	client *http.Client
+
+	publicStateMu    sync.Mutex
+	internalBaseURL  string
+	publicChallenges map[string]publicChallengeEntry
+	publicPayloads   map[string]publicPayloadEntry
 }
 
 func NewApp(config Config, db *DB) *App {
 	return &App{
-		config: config,
-		db:     db,
-		client: &http.Client{Timeout: 45 * time.Second},
+		config:           config,
+		db:               db,
+		client:           &http.Client{Timeout: 45 * time.Second},
+		publicChallenges: make(map[string]publicChallengeEntry),
+		publicPayloads:   make(map[string]publicPayloadEntry),
 	}
 }
 
@@ -34,12 +42,15 @@ func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", a.handleHealth)
 	mux.HandleFunc("/admin", a.handleAdmin)
+	mux.HandleFunc("/api/public/challenge", a.handlePublicChallenge)
+	mux.HandleFunc("/api/public/convert", a.handlePublicConvert)
 	mux.HandleFunc("/assets/", a.handleAsset)
 	mux.HandleFunc("/api/", a.handleAPI)
 	mux.HandleFunc("/sub", a.handleSubscription)
 	mux.HandleFunc("/sub/", a.handleSubscription)
 	mux.HandleFunc("/s/", a.handlePathSubscription)
 	mux.HandleFunc("/internal/nodes", a.handleInternalNodes)
+	mux.HandleFunc("/internal/public/", a.handleInternalPublicInput)
 	mux.HandleFunc("/", a.handleRoot)
 	return securityHeaders(requestLogger(mux))
 }
@@ -65,11 +76,17 @@ func securityHeaders(next http.Handler) http.Handler {
 }
 
 func (a *App) handleRoot(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/" {
-		http.Redirect(w, r, "/admin", http.StatusFound)
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
 		return
 	}
-	http.NotFound(w, r)
+	data, err := webFS.ReadFile("web/public.html")
+	if err != nil {
+		http.Error(w, "public page unavailable", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(data)
 }
 
 func (a *App) handleAdmin(w http.ResponseWriter, r *http.Request) {
@@ -123,13 +140,7 @@ func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleInternalNodes(w http.ResponseWriter, r *http.Request) {
-	host := r.RemoteAddr
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	ip := net.ParseIP(strings.Trim(host, "[]"))
-	if ip == nil || !ip.IsLoopback() {
+	if !isLoopbackRequest(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -146,6 +157,35 @@ func (a *App) handleInternalNodes(w http.ResponseWriter, r *http.Request) {
 	payload := strings.Join(uris, "\n")
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = io.WriteString(w, base64.StdEncoding.EncodeToString([]byte(payload)))
+}
+
+func isLoopbackRequest(r *http.Request) bool {
+	host := r.RemoteAddr
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
+}
+
+func (a *App) handleInternalPublicInput(w http.ResponseWriter, r *http.Request) {
+	if !isLoopbackRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/internal/public/")
+	payload, ok := a.getPublicPayload(id)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = io.WriteString(w, payload)
 }
 
 func parseIDList(value string) ([]int64, error) {

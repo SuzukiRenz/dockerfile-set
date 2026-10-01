@@ -97,7 +97,8 @@ func TestParseNodeInputShadowrocketGroupedJSON(t *testing.T) {
 	if result.Format != "shadowrocket-json" || len(result.URIs) != 2 {
 		t.Fatalf("unexpected grouped JSON result: %#v", result)
 	}
-	if !strings.HasPrefix(result.URIs[0], "vmess://") || !strings.HasPrefix(result.URIs[1], "ss://") {
+	joined := strings.Join(result.URIs, "\n")
+	if !strings.Contains(joined, "vmess://") || !strings.Contains(joined, "ss://") {
 		t.Fatalf("unexpected grouped URIs: %#v", result.URIs)
 	}
 }

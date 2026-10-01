@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sub Hub - 订阅格式转换</title>
+  <link rel="stylesheet" href="/assets/public.css">
+</head>
+<body>
+  <header class="site-header">
+    <a id="admin-entry" class="admin-entry" href="/admin" aria-label="进入管理后台" title="管理后台">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="8" r="3.5"></circle>
+        <path d="M4.5 20c.7-4 3.5-6 7.5-6s6.8 2 7.5 6"></path>
+      </svg>
+    </a>
+    <a class="brand" href="/">
+      <span class="brand-mark">SH</span>
+      <span class="brand-copy"><strong>Sub Hub</strong><small>订阅格式转换</small></span>
+    </a>
+  </header>
+
+  <main class="converter-shell">
+    <section class="converter-intro">
+      <p class="eyebrow">公开工具</p>
+      <h1>把节点整理成标准订阅</h1>
+    </section>
+
+    <form id="converter-form" class="converter-card">
+      <label class="field">
+        <span>节点内容</span>
+        <textarea id="converter-input" rows="11" required placeholder="粘贴标准 URI、Base64 订阅、小火箭 JSON 或分享链接"></textarea>
+      </label>
+
+      <div class="options-row">
+        <label class="field">
+          <span>输出格式</span>
+          <select id="converter-target">
+            <option value="base64">标准 Base64 订阅</option>
+            <option value="clash">Clash / Mihomo</option>
+            <option value="singbox">Sing-Box</option>
+            <option value="surge">Surge</option>
+            <option value="quanx">Quantumult X</option>
+            <option value="loon">Loon</option>
+            <option value="surfboard">Surfboard</option>
+          </select>
+        </label>
+        <div class="verification">
+          <span>人类验证</span>
+          <div class="verification-row">
+            <strong id="captcha-question">加载中</strong>
+            <input id="captcha-answer" type="text" inputmode="numeric" autocomplete="off" required placeholder="答案">
+            <button id="captcha-refresh" class="icon-button" type="button" aria-label="换一题" title="换一题">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M20 11a8 8 0 1 0-2.3 5.7"></path>
+                <path d="M20 5v6h-6"></path>
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button class="primary-button" type="submit" id="convert-submit">开始转换</button>
+        <span id="converter-status" class="status" role="status"></span>
+      </div>
+    </form>
+
+    <section id="result-panel" class="result-panel hidden">
+      <div class="result-head">
+        <div>
+          <p class="eyebrow">转换结果</p>
+          <h2 id="result-summary">0 个节点</h2>
+        </div>
+        <div class="result-actions">
+          <button class="ghost-button" type="button" data-copy="text">复制文本</button>
+          <button class="primary-button" type="button" data-copy="base64">复制 Base64</button>
+        </div>
+      </div>
+      <textarea id="result-output" rows="14" readonly></textarea>
+    </section>
+  </main>
+
+  <script src="/assets/public.js"></script>
+</body>
+</html>
